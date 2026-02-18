@@ -76,7 +76,7 @@ Use `uv` for all Python environment and dependency management (never raw `pip`).
 
 ## Memory safety considerations
 
-- **GIL discipline:** Hold `Python<'py>` token only as long as needed. Release the GIL (`py.allow_threads(|| ...)`) for long-running Rust operations.
+- **GIL discipline:** Hold `Python<'py>` token only as long as needed. Release the GIL (`py.detach(|| ...)`) for long-running Rust operations.
 - **Reference counting:** Use `Py<T>` for storing Python objects in Rust structs. Clone references rather than holding borrows across await points.
 - **Copy over reference:** Prefer copying data across the FFI boundary instead of handing out raw references to Rust memory.
 - **Async safety:** Futures stored across `.await` must be `Send`. Do not hold `Python<'py>` or `&PyAny` across `.await` — extract data before yielding.

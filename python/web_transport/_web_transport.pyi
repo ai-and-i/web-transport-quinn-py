@@ -19,9 +19,15 @@ def generate_self_signed(
     Args:
         subject_alt_names: SANs for the certificate
             (e.g. ``["localhost", "127.0.0.1", "::1"]``).
+            Each entry is parsed as an IP address if possible, otherwise
+            treated as a DNS name.
 
     Returns:
         A ``(certificate_der, private_key_der)`` tuple of raw DER bytes.
+
+    Raises:
+        ValueError: If *subject_alt_names* is empty or contains values that
+            are neither valid DNS names nor IP addresses.
     """
     ...
 
@@ -42,7 +48,6 @@ def certificate_hash(certificate_der: bytes) -> bytes:
 # WebTransportError                     Base for all web-transport errors
 # ├── SessionError                      Session-level failures
 # │   ├── ConnectError                  Failed to establish a session
-# │   │   └── SessionRejected           Server rejected with HTTP status (.status_code)
 # │   ├── SessionClosed                 Session closed (either side)
 # │   │   ├── SessionClosedByPeer       Peer closed (.source, .code?, .reason?)
 # │   │   └── SessionClosedLocally      Local side already closed the session
@@ -75,16 +80,6 @@ class ConnectError(SessionError):
     """Failed to establish a WebTransport session."""
 
     ...
-
-class SessionRejected(ConnectError):
-    """The server rejected the session request with an HTTP error status.
-
-    Attributes:
-        status_code: The HTTP status code returned by the server
-            (e.g. ``403``, ``404``, ``429``).
-    """
-
-    status_code: int
 
 class SessionClosed(SessionError):
     """The session was closed (by either side).
@@ -178,11 +173,14 @@ class StreamClosedLocally(StreamClosed):
 class StreamTooLongError(StreamError):
     """A ``read()`` call exceeded the maximum allowed data size.
 
-    Raised when reading until EOF (``read(-1)``) and the incoming data
-    exceeds the internal size limit before the stream finishes.
+    Raised when reading until EOF (``read(-1, limit=...)``) and the incoming
+    data exceeds *limit* before the stream finishes.
+
+    Attributes:
+        limit: The byte limit that was exceeded.
     """
 
-    ...
+    limit: int
 
 class StreamIncompleteReadError(StreamError):
     """EOF was reached before enough bytes were read.
@@ -260,7 +258,17 @@ class Server:
         congestion_control: Literal["default", "throughput", "low_latency"] = "default",
         max_idle_timeout: float | None = 30,
         keep_alive_interval: float | None = None,
-    ) -> None: ...
+    ) -> None:
+        """Create a new WebTransport server.
+
+        Raises:
+            ValueError: If *bind* is not a valid socket address, *private_key*
+                is not a valid PKCS#8 DER-encoded key, the certificate chain
+                is invalid, *congestion_control* is not a recognized algorithm,
+                or *max_idle_timeout* is out of range.
+        """
+        ...
+
     async def __aenter__(self) -> Server: ...
     async def __aexit__(
         self,
@@ -280,9 +288,19 @@ class Server:
     def close(self, code: int = 0, reason: str = "") -> None:
         """Close all connections immediately and stop accepting new ones.
 
+        This is a QUIC endpoint-level operation: it sends a
+        ``CONNECTION_CLOSE`` frame to every connected client.  The *code*
+        is placed on the wire as-is (no WebTransport-to-HTTP/3 mapping).
+        Use :meth:`Session.close` to close an individual session with a
+        WebTransport application error code.
+
         Args:
-            code: Application error code (default ``0``).
+            code: QUIC application error code (default ``0``).
+                Must be less than ``2**62``.
             reason: Human-readable close reason (default ``""``).
+
+        Raises:
+            ValueError: If *code* is not below ``2**62``.
         """
         ...
 
@@ -312,6 +330,10 @@ class SessionRequest:
 
         Returns:
             An established :class:`Session`.
+
+        Raises:
+            SessionError: If the request was already accepted or rejected, or
+                the underlying connection was lost.
         """
         ...
 
@@ -320,6 +342,11 @@ class SessionRequest:
 
         Args:
             status_code: HTTP status code (e.g. ``403``, ``404``, ``429``).
+
+        Raises:
+            ValueError: If *status_code* is not a valid HTTP status code.
+            SessionError: If the request was already accepted or rejected, or
+                the underlying connection was lost.
         """
         ...
 
@@ -357,7 +384,16 @@ class Client:
         congestion_control: Literal["default", "throughput", "low_latency"] = "default",
         max_idle_timeout: float | None = 30,
         keep_alive_interval: float | None = None,
-    ) -> None: ...
+    ) -> None:
+        """Create a new WebTransport client.
+
+        Raises:
+            ValueError: If *congestion_control* is not a recognized algorithm,
+                *max_idle_timeout* is out of range, or the QUIC endpoint
+                could not be created.
+        """
+        ...
+
     async def __aenter__(self) -> Client: ...
     async def __aexit__(
         self,
@@ -365,6 +401,29 @@ class Client:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None: ...
+    def close(self, code: int = 0, reason: str = "") -> None:
+        """Close all connections immediately.
+
+        This is a QUIC endpoint-level operation: it sends a
+        ``CONNECTION_CLOSE`` frame to every connection on the endpoint.
+        The *code* is placed on the wire as-is (no WebTransport-to-HTTP/3
+        mapping).  Use :meth:`Session.close` to close an individual
+        session with a WebTransport application error code.
+
+        Args:
+            code: QUIC application error code (default ``0``).
+                Must be less than ``2**62``.
+            reason: Human-readable close reason (default ``""``).
+
+        Raises:
+            ValueError: If *code* is not below ``2**62``.
+        """
+        ...
+
+    async def wait_closed(self) -> None:
+        """Wait for all connections to be cleanly shut down."""
+        ...
+
     async def connect(self, url: str) -> Session:
         """Open a WebTransport session to the given URL.
 
@@ -375,7 +434,12 @@ class Client:
             An established :class:`Session`.
 
         Raises:
-            ConnectError: If the connection cannot be established.
+            ValueError: If *url* is not a valid URL.
+            ConnectError: If the connection cannot be established (e.g.
+                DNS resolution failure, HTTP/3 error, or invalid server name).
+            SessionTimeout: If the connection attempt timed out.
+            ProtocolError: If a QUIC or HTTP/3 protocol violation occurred
+                during the handshake.
         """
         ...
 
@@ -406,6 +470,12 @@ class Session:
 
         Returns:
             A ``(send, recv)`` stream pair.
+
+        Raises:
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If a QUIC or HTTP/3 protocol violation occurred.
         """
         ...
 
@@ -414,6 +484,12 @@ class Session:
 
         Returns:
             A :class:`SendStream`.
+
+        Raises:
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If a QUIC or HTTP/3 protocol violation occurred.
         """
         ...
 
@@ -422,6 +498,12 @@ class Session:
 
         Returns:
             A ``(send, recv)`` stream pair.
+
+        Raises:
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If a QUIC or HTTP/3 protocol violation occurred.
         """
         ...
 
@@ -430,24 +512,46 @@ class Session:
 
         Returns:
             A :class:`RecvStream`.
+
+        Raises:
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If a QUIC or HTTP/3 protocol violation occurred.
         """
         ...
 
     # -- Datagrams ----------------------------------------------------------
 
-    async def send_datagram(self, data: bytes) -> None:
+    def send_datagram(self, data: bytes) -> None:
         """Send an unreliable datagram.
 
         Args:
             data: Payload bytes. Must not exceed :attr:`max_datagram_size`.
 
         Raises:
-            DatagramTooLargeError: If *data* exceeds the maximum size.
+            DatagramTooLargeError: If *data* exceeds the maximum datagram size
+                for this session.
+            DatagramNotSupportedError: If datagrams are not supported by the
+                peer or are disabled locally.
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
         """
         ...
 
     async def receive_datagram(self) -> bytes:
-        """Wait for and return the next incoming datagram."""
+        """Wait for and return the next incoming datagram.
+
+        Returns:
+            The datagram payload as raw bytes.
+
+        Raises:
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If a QUIC or HTTP/3 protocol violation occurred.
+        """
         ...
 
     # -- Lifecycle ----------------------------------------------------------
@@ -455,17 +559,45 @@ class Session:
     def close(self, code: int = 0, reason: str = "") -> None:
         """Close the session immediately.
 
+        Sends a QUIC ``CONNECTION_CLOSE`` frame with the error code
+        mapped into the HTTP/3 error code space via the WebTransport
+        error-code mapping defined in :rfc:`9297#section-4.3`.  The peer
+        will observe this as a :class:`SessionClosedByPeer` with
+        ``source="application"``.
+
+        This method is idempotent — calling it on an already-closed session
+        is a no-op.
+
         Args:
-            code: Application error code (default ``0``).
+            code: WebTransport application error code (default ``0``).
+                Valid range is ``0`` to ``2**32 - 1``.
             reason: Human-readable close reason (default ``""``).
+                The transport layer may truncate this string if it exceeds
+                the maximum QUIC ``CONNECTION_CLOSE`` reason phrase length.
         """
         ...
 
     async def wait_closed(self) -> None:
-        """Wait until the session is closed (for any reason)."""
+        """Wait until the session is closed (for any reason).
+
+        Returns immediately if the session is already closed. This method
+        never raises — it silently absorbs the close reason.  Use
+        :attr:`close_reason` afterwards to inspect why the session closed.
+        """
         ...
 
     # -- Properties ---------------------------------------------------------
+
+    @property
+    def close_reason(self) -> SessionError | None:
+        """The reason the session was closed, or ``None`` if still open.
+
+        Returns the exception that would have been raised by an in-flight
+        operation (e.g. :class:`SessionClosedByPeer`, :class:`SessionTimeout`),
+        without raising it.  Can be inspected at any time, including after
+        :meth:`wait_closed` returns.
+        """
+        ...
 
     @property
     def max_datagram_size(self) -> int:
@@ -485,8 +617,9 @@ class Session:
 class SendStream:
     """A writable QUIC stream.
 
-    Use as an async context manager: :meth:`finish` is called on clean exit,
-    :meth:`reset` on exception::
+    Use as an async context manager: on clean exit, waits for any in-progress
+    write to complete and then calls :meth:`finish`.  On exception, cancels
+    any in-progress write immediately and calls ``reset(error_code=0)``::
 
         async with send:
             await send.write(b"hello")
@@ -502,8 +635,24 @@ class SendStream:
     async def write(self, data: bytes) -> None:
         """Write all data to the stream.
 
+        Blocks until all bytes have been delivered to the QUIC send buffer.
+        If :meth:`reset` is called while this write is pending, the write
+        is interrupted and raises :class:`StreamClosedLocally`.
+
         Args:
             data: Bytes to write. Guaranteed to be fully written or raise.
+
+        Raises:
+            StreamClosedByPeer: If the peer sent ``STOP_SENDING`` on this
+                stream (``kind="stop"``).
+            StreamClosedLocally: If the stream was already finished or reset
+                locally, or :meth:`reset` was called while the write was
+                in progress.
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If the peer sent ``STOP_SENDING`` with an invalid
+                error code, or another QUIC/HTTP/3 protocol violation occurred.
         """
         ...
 
@@ -512,24 +661,63 @@ class SendStream:
 
         Low-level API. May write fewer bytes than ``len(data)`` due to flow
         control. Prefer :meth:`write` unless you need fine-grained control.
+        If :meth:`reset` is called while this write is pending, the write
+        is interrupted and raises :class:`StreamClosedLocally`.
 
         Args:
             data: Bytes to write.
 
         Returns:
             Number of bytes actually written.
+
+        Raises:
+            StreamClosedByPeer: If the peer sent ``STOP_SENDING`` on this
+                stream (``kind="stop"``).
+            StreamClosedLocally: If the stream was already finished or reset
+                locally, or :meth:`reset` was called while the write was
+                in progress.
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If the peer sent ``STOP_SENDING`` with an invalid
+                error code, or another QUIC/HTTP/3 protocol violation occurred.
         """
         ...
 
-    def finish(self) -> None:
-        """Gracefully close the stream, signaling EOF to the peer."""
+    async def finish(self) -> None:
+        """Gracefully close the send side of the stream.
+
+        Waits for any in-progress write to complete, then queues a QUIC
+        ``FIN`` for sending.  The frame is transmitted on the next I/O
+        cycle — this method does not wait for it to reach the peer.  If
+        the connection has already been lost, the frame is silently dropped
+        (no error is raised).
+
+        Can be interrupted by :meth:`reset`, which causes both the pending
+        write and this finish to raise :class:`StreamClosedLocally`.
+
+        Raises:
+            StreamClosedLocally: If the stream was already finished or reset.
+        """
         ...
 
     def reset(self, error_code: int = 0) -> None:
         """Abruptly reset the stream.
 
+        Discards any unsent data and queues a QUIC ``RESET_STREAM`` frame
+        for sending.  The frame is transmitted on the next I/O cycle — this
+        method does not wait for it to reach the peer.  If the connection
+        has already been lost, the frame is silently dropped (no error is
+        raised).
+
+        If a :meth:`write` or :meth:`finish` is in progress, it will be
+        interrupted and raise :class:`StreamClosedLocally`.
+
         Args:
             error_code: Application error code (default ``0``).
+
+        Raises:
+            StreamClosedLocally: If the stream was already finished or reset.
         """
         ...
 
@@ -543,6 +731,11 @@ class SendStream:
 
 class RecvStream:
     """A readable QUIC stream.
+
+    Use as an async context manager: on clean exit, calls ``stop(error_code=0)``
+    if the stream has not reached EOF (to promptly signal the peer).  On
+    exception, cancels any in-progress read immediately and calls
+    ``stop(error_code=0)``.
 
     Supports ``async for`` to iterate over incoming chunks until EOF::
 
@@ -559,32 +752,87 @@ class RecvStream:
     ) -> None: ...
     def __aiter__(self) -> AsyncIterator[bytes]: ...
     async def __anext__(self) -> bytes: ...
-    async def read(self, n: int = -1) -> bytes:
+    async def read(self, n: int = -1, *, limit: int | None = None) -> bytes:
         """Read up to *n* bytes from the stream, or until EOF if *n* is ``-1``.
 
-        Returns an empty ``bytes`` at EOF.
+        Returns an empty ``bytes`` at EOF.  Like :meth:`asyncio.StreamReader.read`,
+        this is idempotent: once EOF has been reached, subsequent calls keep
+        returning ``b""`` without contacting the peer.
+
+        If :meth:`stop` is called while a read is pending, the read is
+        interrupted and raises :class:`StreamClosedLocally`.
 
         Args:
             n: Maximum number of bytes to read. Pass ``-1`` (the default)
                 to read until EOF.
+            limit: Maximum number of bytes to buffer when reading until EOF
+                (``n=-1``).  Raises :class:`StreamTooLongError` if the stream
+                exceeds this before finishing.  ``None`` (the default) means
+                no limit.  Ignored when *n* >= 0.
+
+        Raises:
+            StreamClosedByPeer: If the peer sent ``RESET_STREAM`` on this
+                stream (``kind="reset"``).
+            StreamClosedLocally: If the stream was already stopped locally,
+                or :meth:`stop` was called while the read was in progress.
+            StreamTooLongError: If reading until EOF (``n=-1``) and the
+                incoming data exceeds *limit*.  The exception's ``.limit``
+                attribute contains the value that was exceeded.
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If the peer sent ``RESET_STREAM`` with an invalid
+                error code, or another QUIC/HTTP/3 protocol violation occurred.
         """
         ...
 
     async def readexactly(self, n: int) -> bytes:
         """Read exactly *n* bytes.
 
+        If EOF has already been reached, immediately raises
+        :class:`StreamIncompleteReadError` with ``partial=b""``.
+
+        If :meth:`stop` is called while a read is pending, the read is
+        interrupted and raises :class:`StreamClosedLocally`.
+
         Args:
             n: Number of bytes to read.
 
+        Returns:
+            Exactly *n* bytes.
+
         Raises:
-            StreamIncompleteReadError: If EOF is reached before *n* bytes.
+            StreamIncompleteReadError: If EOF is reached before *n* bytes
+                have been received. The ``.expected`` attribute contains the
+                requested count and ``.partial`` contains the bytes that were
+                successfully read before EOF.
+            StreamClosedByPeer: If the peer sent ``RESET_STREAM`` on this
+                stream (``kind="reset"``).
+            StreamClosedLocally: If the stream was already stopped locally,
+                or :meth:`stop` was called while the read was in progress.
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If the peer sent ``RESET_STREAM`` with an invalid
+                error code, or another QUIC/HTTP/3 protocol violation occurred.
         """
         ...
 
     def stop(self, error_code: int = 0) -> None:
         """Tell the peer to stop sending on this stream.
 
+        Queues a QUIC ``STOP_SENDING`` frame for sending.  The frame is
+        transmitted on the next I/O cycle — this method does not wait for
+        it to reach the peer.  If the connection has already been lost,
+        the frame is silently dropped (no error is raised).
+
+        If a :meth:`read` or :meth:`readexactly` call is in progress, it
+        will be interrupted and raise :class:`StreamClosedLocally`.
+
         Args:
             error_code: Application error code (default ``0``).
+
+        Raises:
+            StreamClosedLocally: If the stream was already stopped.
         """
         ...
