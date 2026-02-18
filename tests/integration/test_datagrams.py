@@ -1,3 +1,5 @@
+"""Integration tests for datagram functionality."""
+
 import asyncio
 
 import pytest
@@ -74,3 +76,71 @@ async def test_max_datagram_size(self_signed_cert, cert_hash):
             asyncio.create_task(server_task()),
             asyncio.create_task(client_task()),
         )
+
+
+@pytest.mark.asyncio
+async def test_datagram_too_large(session_pair):
+    """Send datagram > max_datagram_size -> DatagramTooLargeError."""
+    _server_session, client_session = session_pair
+
+    max_size = client_session.max_datagram_size
+    oversized = b"x" * (max_size + 1)
+
+    with pytest.raises(web_transport.DatagramTooLargeError):
+        client_session.send_datagram(oversized)
+
+
+@pytest.mark.asyncio
+async def test_empty_datagram(session_pair):
+    """send_datagram(b"") succeeds."""
+    server_session, client_session = session_pair
+
+    async def server_side():
+        data = await server_session.receive_datagram()
+        assert data == b""
+
+    task = asyncio.create_task(server_side())
+    client_session.send_datagram(b"")
+    await asyncio.wait_for(task, timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_multiple_datagrams(session_pair):
+    """Send N datagrams rapidly -> all received on loopback."""
+    server_session, client_session = session_pair
+
+    n = 20
+    received = []
+
+    async def server_side():
+        for _ in range(n):
+            data = await server_session.receive_datagram()
+            received.append(data)
+
+    task = asyncio.create_task(server_side())
+
+    for i in range(n):
+        client_session.send_datagram(f"msg-{i}".encode())
+
+    await asyncio.wait_for(task, timeout=5.0)
+    assert len(received) == n
+    expected = {f"msg-{i}".encode() for i in range(n)}
+    assert set(received) == expected
+
+
+@pytest.mark.asyncio
+async def test_datagram_binary_data(session_pair):
+    """All byte values 0x00-0xFF roundtrip intact."""
+    server_session, client_session = session_pair
+
+    payload = bytes(range(256))
+
+    async def server_side():
+        data = await server_session.receive_datagram()
+        server_session.send_datagram(data)
+
+    task = asyncio.create_task(server_side())
+    client_session.send_datagram(payload)
+    response = await asyncio.wait_for(client_session.receive_datagram(), timeout=5.0)
+    assert response == payload
+    await task
