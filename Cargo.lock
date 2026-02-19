@@ -1212,8 +1212,7 @@ dependencies = [
 [[package]]
 name = "web-transport-proto"
 version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17633ea7058419f87cbb7f341ab75ac5c1d6d187c154b0bd4c87539e66f4c4e4"
+source = "git+https://github.com/ai-and-i/web-transport.git?branch=fix%2Fconnect-read-overconsumes#b088616e93bac2b38cd61c9e729c04fc2d1705b1"
 dependencies = [
  "bytes",
  "http",
@@ -1244,8 +1243,7 @@ dependencies = [
 [[package]]
 name = "web-transport-quinn"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96b195557749e84091d7b912a25e190e9606283b5121d041faf538b0b55f40d7"
+source = "git+https://github.com/ai-and-i/web-transport.git?branch=fix%2Fconnect-read-overconsumes#b088616e93bac2b38cd61c9e729c04fc2d1705b1"
 dependencies = [
  "bytes",
  "futures",
@@ -1264,8 +1262,7 @@ dependencies = [
 [[package]]
 name = "web-transport-trait"
 version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "802d6aa508f2c63c9050ceabc17265bbf90ed4d6f4e4357e987583883628e79c"
+source = "git+https://github.com/ai-and-i/web-transport.git?branch=fix%2Fconnect-read-overconsumes#b088616e93bac2b38cd61c9e729c04fc2d1705b1"
 dependencies = [
  "bytes",
 ]
