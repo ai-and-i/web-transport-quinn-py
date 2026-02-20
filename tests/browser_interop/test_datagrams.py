@@ -7,14 +7,16 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import web_transport
+
 if TYPE_CHECKING:
     from .conftest import RunJS, ServerFactory
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-async def test_datagram_echo(start_server: ServerFactory, run_js: RunJS) -> None:
-    """A datagram roundtrips between Chromium and the echo server."""
+async def test_datagram_echo_text(start_server: ServerFactory, run_js: RunJS) -> None:
+    """Text datagram roundtrips between Chromium and the server."""
     async with start_server() as (server, port, hash_b64):
 
         async def server_side() -> None:
@@ -43,3 +45,231 @@ async def test_datagram_echo(start_server: ServerFactory, run_js: RunJS) -> None
             )
 
     assert result == "datagram ping"
+
+
+async def test_datagram_echo_binary(start_server: ServerFactory, run_js: RunJS) -> None:
+    """All 256 byte values as datagram roundtrip."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                dgram = await session.receive_datagram()
+                session.send_datagram(dgram)
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result = await run_js(
+                port,
+                hash_b64,
+                """
+                const writer = transport.datagrams.writable.getWriter();
+                const reader = transport.datagrams.readable.getReader();
+                const payload = new Uint8Array(256);
+                for (let i = 0; i < 256; i++) payload[i] = i;
+                await writer.write(payload);
+                const { value } = await reader.read();
+                reader.releaseLock();
+                writer.releaseLock();
+                return Array.from(value);
+            """,
+            )
+
+    assert result == list(range(256))
+
+
+@pytest.mark.xfail(
+    reason="Empty datagrams may not be supported by the browser or cause connection errors"
+)
+async def test_datagram_empty(start_server: ServerFactory, run_js: RunJS) -> None:
+    """Browser sends empty datagram, server echoes b''."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                dgram = await session.receive_datagram()
+                session.send_datagram(dgram)
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result = await run_js(
+                port,
+                hash_b64,
+                """
+                const writer = transport.datagrams.writable.getWriter();
+                const reader = transport.datagrams.readable.getReader();
+                await writer.write(new Uint8Array(0));
+                const { value } = await reader.read();
+                reader.releaseLock();
+                writer.releaseLock();
+                return Array.from(value);
+            """,
+            )
+
+    assert result == []
+
+
+async def test_datagram_server_initiates(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Server sends datagram first, browser reads it."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                # Small delay to let browser set up reader
+                await asyncio.sleep(0.1)
+                session.send_datagram(b"server-first")
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result = await run_js(
+                port,
+                hash_b64,
+                """
+                const reader = transport.datagrams.readable.getReader();
+                const { value } = await reader.read();
+                reader.releaseLock();
+                return new TextDecoder().decode(value);
+            """,
+            )
+
+    assert result == "server-first"
+
+
+async def test_datagram_multiple_roundtrips(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """10 sequential request-response datagram exchanges."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                for _ in range(10):
+                    dgram = await session.receive_datagram()
+                    session.send_datagram(dgram)
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result = await run_js(
+                port,
+                hash_b64,
+                """
+                const writer = transport.datagrams.writable.getWriter();
+                const reader = transport.datagrams.readable.getReader();
+                const results = [];
+                for (let i = 0; i < 10; i++) {
+                    const msg = new TextEncoder().encode("msg-" + i);
+                    await writer.write(msg);
+                    const { value } = await reader.read();
+                    results.push(new TextDecoder().decode(value));
+                }
+                reader.releaseLock();
+                writer.releaseLock();
+                return results;
+            """,
+            )
+
+    assert result == [f"msg-{i}" for i in range(10)]
+
+
+async def test_datagram_rapid_burst(start_server: ServerFactory, run_js: RunJS) -> None:
+    """Browser sends 20 datagrams rapidly — server receives at least some (unreliable)."""
+    async with start_server() as (server, port, hash_b64):
+        received: list[bytes] = []
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                # Collect datagrams with a timeout
+                try:
+                    while True:
+                        dgram = await asyncio.wait_for(
+                            session.receive_datagram(), timeout=2.0
+                        )
+                        received.append(dgram)
+                except (TimeoutError, asyncio.TimeoutError):
+                    pass
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const writer = transport.datagrams.writable.getWriter();
+                for (let i = 0; i < 20; i++) {
+                    const msg = new TextEncoder().encode("burst-" + i);
+                    await writer.write(msg);
+                }
+                writer.releaseLock();
+                // Wait for server to collect
+                await new Promise(r => setTimeout(r, 2500));
+                return true;
+            """,
+            )
+
+    # Datagrams are unreliable — on loopback we expect most but not necessarily all
+    assert len(received) >= 1
+
+
+async def test_datagram_max_size_property(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """session.max_datagram_size is a positive int."""
+    async with start_server() as (server, port, hash_b64):
+        max_size: int = 0
+
+        async def server_side() -> None:
+            nonlocal max_size
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                max_size = session.max_datagram_size
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(port, hash_b64, "return true;")
+
+    assert max_size > 0
+
+
+async def test_datagram_oversized_raises(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Server sends datagram > max_datagram_size → raises DatagramTooLargeError."""
+    async with start_server() as (server, port, hash_b64):
+        error: web_transport.DatagramTooLargeError | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                max_size = session.max_datagram_size
+                try:
+                    session.send_datagram(b"\x00" * (max_size + 1))
+                except web_transport.DatagramTooLargeError as e:
+                    error = e
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(port, hash_b64, "return true;")
+
+    assert error is not None

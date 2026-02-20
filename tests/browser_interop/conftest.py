@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -29,7 +30,8 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 ServerContext = AbstractAsyncContextManager[tuple[web_transport.Server, int, str]]
 ServerFactory = Callable[..., ServerContext]
-RunJS = Callable[[int, str, str], Awaitable[object]]
+RunJS = Callable[[int, str, str], Awaitable[Any]]
+RunJSRaw = Callable[[str], Awaitable[Any]]
 
 # ---------------------------------------------------------------------------
 # Reusable JS helpers injected into every run_js call
@@ -196,7 +198,7 @@ def run_js(page: Page) -> RunJS:
     ``writeAllString``.
     """
 
-    async def _run(port: int, hash_b64: str, js_body: str) -> object:
+    async def _run(port: int, hash_b64: str, js_body: str) -> Any:
         setup = _webtransport_connect_js(port, hash_b64)
         script = f"""
             async () => {{
@@ -211,6 +213,31 @@ def run_js(page: Page) -> RunJS:
                 }}
             }}
         """
+        return await page.evaluate(script)
+
+    return _run
+
+
+# ---------------------------------------------------------------------------
+# Layer 3b: Raw JS evaluation helper (no auto-connect)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def run_js_raw(page: Page) -> RunJSRaw:
+    """Execute JS without auto-creating a WebTransport connection.
+
+    Use this for tests that need to control the connection lifecycle
+    themselves — e.g. observing ``transport.ready`` rejection or
+    ``transport.closed`` resolution.
+
+    The JS body has access to the helper functions (``readAll``, ``writeAll``,
+    ``readAllString``, ``writeAllString``) but must create and manage the
+    ``WebTransport`` instance itself.
+    """
+
+    async def _run(js_body: str) -> Any:
+        script = f"""async () => {{ {JS_HELPERS}\n{js_body} }}"""
         return await page.evaluate(script)
 
     return _run
