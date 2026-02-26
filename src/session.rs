@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 use crate::errors;
 use crate::recv_stream::RecvStream;
+use crate::runtime;
 use crate::send_stream::SendStream;
 
 #[pyclass]
@@ -106,6 +107,7 @@ impl Session {
     /// Close the session immediately.
     #[pyo3(signature = (code=0, reason=""))]
     fn close(&self, code: u32, reason: &str) {
+        let _guard = runtime::get_runtime().enter();
         self.inner.close(code, reason.as_bytes());
     }
 
