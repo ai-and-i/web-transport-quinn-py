@@ -1,11 +1,11 @@
-# web-transport-py
+# web-transport-quinn-py
 
 Python bindings for [web-transport-quinn](https://docs.rs/web-transport-quinn/) (Rust WebTransport library), built with PyO3 and maturin.
 
 ## Project layout
 
 ```
-web-transport-py/
+web-transport-quinn-py/
 ├── Cargo.toml              # Rust crate config (pyo3 dependency, cdylib)
 ├── pyproject.toml          # Python package metadata, maturin build-backend
 ├── src/                    # Rust source (PyO3 bindings)
