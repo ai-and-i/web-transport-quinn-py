@@ -502,6 +502,17 @@ class Session:
     async def accept_bi(self) -> tuple[SendStream, RecvStream]:
         """Wait for the peer to open a bidirectional stream.
 
+        .. note::
+
+            Only one ``accept_bi`` call should be awaited at a time per
+            session.  Concurrent calls will cause all but one to hang
+            indefinitely due to an upstream limitation in the stream
+            accept queue.  Use a single accept loop instead::
+
+                while True:
+                    send, recv = await session.accept_bi()
+                    asyncio.create_task(handle_stream(send, recv))
+
         Returns:
             A ``(send, recv)`` stream pair.
 
@@ -515,6 +526,11 @@ class Session:
 
     async def accept_uni(self) -> RecvStream:
         """Wait for the peer to open a unidirectional stream.
+
+        .. note::
+
+            Only one ``accept_uni`` call should be awaited at a time per
+            session.  See :meth:`accept_bi` for details.
 
         Returns:
             A :class:`RecvStream`.
