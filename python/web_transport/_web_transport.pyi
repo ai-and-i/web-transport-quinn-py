@@ -292,13 +292,17 @@ class Server:
         ...
 
     def close(self, code: int = 0, reason: str = "") -> None:
-        """Close all connections immediately and stop accepting new ones.
+        """Close all connections and stop accepting new ones.
 
         This is a QUIC endpoint-level operation: it sends a
         ``CONNECTION_CLOSE`` frame to every connected client.  The *code*
         is placed on the wire as-is (no WebTransport-to-HTTP/3 mapping).
         Use :meth:`Session.close` to close an individual session with a
         WebTransport application error code.
+
+        This method is synchronous — it queues the close frames and
+        returns immediately.  Call ``await wait_closed()`` afterwards to
+        ensure the frames are transmitted to peers.
 
         Args:
             code: QUIC application error code (default ``0``).
@@ -408,13 +412,17 @@ class Client:
         exc_tb: TracebackType | None,
     ) -> None: ...
     def close(self, code: int = 0, reason: str = "") -> None:
-        """Close all connections immediately.
+        """Close all connections.
 
         This is a QUIC endpoint-level operation: it sends a
         ``CONNECTION_CLOSE`` frame to every connection on the endpoint.
         The *code* is placed on the wire as-is (no WebTransport-to-HTTP/3
         mapping).  Use :meth:`Session.close` to close an individual
         session with a WebTransport application error code.
+
+        This method is synchronous — it queues the close frames and
+        returns immediately.  Call ``await wait_closed()`` afterwards to
+        ensure the frames are transmitted to peers.
 
         Args:
             code: QUIC application error code (default ``0``).
@@ -579,13 +587,20 @@ class Session:
     # -- Lifecycle ----------------------------------------------------------
 
     def close(self, code: int = 0, reason: str = "") -> None:
-        """Close the session immediately.
+        """Close the session.
 
-        Sends a QUIC ``CONNECTION_CLOSE`` frame with the error code
-        mapped into the HTTP/3 error code space via the WebTransport
-        error-code mapping defined in :rfc:`9297#section-4.3`.  The peer
-        will observe this as a :class:`SessionClosedByPeer` with
-        ``source="application"``.
+        Sends a WebTransport ``CLOSE_WEBTRANSPORT_SESSION`` capsule with
+        the given *code* and *reason*.  The peer will observe this as a
+        :class:`SessionClosedByPeer` with ``source="session"``.
+
+        This method is synchronous — it queues the close capsule and
+        returns immediately.  Call ``await wait_closed()`` afterwards to
+        ensure the capsule is fully transmitted to the peer before the
+        connection is torn down.  Without ``wait_closed()``, the capsule
+        may only be partially sent if the connection closes shortly after
+        (e.g. the enclosing task or context manager exits), causing the
+        peer to see an unexpected error instead of a clean
+        :class:`SessionClosedByPeer`.
 
         This method is idempotent — calling it on an already-closed session
         is a no-op.
@@ -594,8 +609,6 @@ class Session:
             code: WebTransport application error code (default ``0``).
                 Valid range is ``0`` to ``2**32 - 1``.
             reason: Human-readable close reason (default ``""``).
-                The transport layer may truncate this string if it exceeds
-                the maximum QUIC ``CONNECTION_CLOSE`` reason phrase length.
         """
         ...
 
