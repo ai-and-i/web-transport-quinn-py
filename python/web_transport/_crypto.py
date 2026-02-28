@@ -25,6 +25,9 @@ def generate_self_signed(
     Returns:
         A ``(certificate_der, private_key_der)`` tuple of raw DER bytes.
     """
+    if not subject_alt_names:
+        raise ValueError("subject_alt_names must not be empty")
+
     key = ec.generate_private_key(ec.SECP256R1())
 
     sans: list[x509.GeneralName] = []
