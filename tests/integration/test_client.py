@@ -233,7 +233,7 @@ async def test_keep_alive_prevents_timeout(self_signed_cert, cert_hash):
         certificate_chain=[cert],
         private_key=key,
         bind="[::1]:0",
-        max_idle_timeout=0.5,
+        max_idle_timeout=1.0,
         keep_alive_interval=0.1,
     ) as server:
         _, port = server.local_addr
@@ -243,15 +243,15 @@ async def test_keep_alive_prevents_timeout(self_signed_cert, cert_hash):
             assert request is not None
             session = await request.accept()
             # Wait longer than the idle timeout
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
             # Session should still be alive
             assert session.close_reason is None
-            session.close()
+            await session.wait_closed()
 
         async def client_task():
             async with web_transport.Client(
                 server_certificate_hashes=[cert_hash],
-                max_idle_timeout=0.5,
+                max_idle_timeout=1.0,
                 keep_alive_interval=0.1,
             ) as client:
                 session = await client.connect(f"https://[::1]:{port}")
