@@ -328,7 +328,7 @@ wheels = [
 ]
 
 [[package]]
-name = "web-transport-py"
+name = "web-transport-quinn"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
