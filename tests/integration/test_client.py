@@ -277,6 +277,154 @@ async def test_client_wait_closed():
 
 
 @pytest.mark.asyncio
+async def test_open_bi_after_timeout(self_signed_cert, cert_hash):
+    """open_bi() after idle timeout -> SessionTimeout or SessionClosed."""
+    cert, key = self_signed_cert
+
+    async with web_transport.Server(
+        certificate_chain=[cert],
+        private_key=key,
+        bind="[::1]:0",
+        max_idle_timeout=0.5,
+    ) as server:
+        _, port = server.local_addr
+
+        async def server_task():
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            await session.wait_closed()
+
+        async def client_task():
+            async with web_transport.Client(
+                server_certificate_hashes=[cert_hash],
+                max_idle_timeout=0.5,
+            ) as client:
+                session = await client.connect(f"https://[::1]:{port}")
+                await session.wait_closed()
+                with pytest.raises(
+                    (web_transport.SessionTimeout, web_transport.SessionClosed)
+                ):
+                    await session.open_bi()
+
+        await asyncio.gather(
+            asyncio.create_task(server_task()),
+            asyncio.create_task(client_task()),
+        )
+
+
+@pytest.mark.asyncio
+async def test_open_uni_after_timeout(self_signed_cert, cert_hash):
+    """open_uni() after idle timeout -> SessionTimeout or SessionClosed."""
+    cert, key = self_signed_cert
+
+    async with web_transport.Server(
+        certificate_chain=[cert],
+        private_key=key,
+        bind="[::1]:0",
+        max_idle_timeout=0.5,
+    ) as server:
+        _, port = server.local_addr
+
+        async def server_task():
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            await session.wait_closed()
+
+        async def client_task():
+            async with web_transport.Client(
+                server_certificate_hashes=[cert_hash],
+                max_idle_timeout=0.5,
+            ) as client:
+                session = await client.connect(f"https://[::1]:{port}")
+                await session.wait_closed()
+                with pytest.raises(
+                    (web_transport.SessionTimeout, web_transport.SessionClosed)
+                ):
+                    await session.open_uni()
+
+        await asyncio.gather(
+            asyncio.create_task(server_task()),
+            asyncio.create_task(client_task()),
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_datagram_after_timeout(self_signed_cert, cert_hash):
+    """send_datagram() after idle timeout -> SessionTimeout or SessionClosed."""
+    cert, key = self_signed_cert
+
+    async with web_transport.Server(
+        certificate_chain=[cert],
+        private_key=key,
+        bind="[::1]:0",
+        max_idle_timeout=0.5,
+    ) as server:
+        _, port = server.local_addr
+
+        async def server_task():
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            await session.wait_closed()
+
+        async def client_task():
+            async with web_transport.Client(
+                server_certificate_hashes=[cert_hash],
+                max_idle_timeout=0.5,
+            ) as client:
+                session = await client.connect(f"https://[::1]:{port}")
+                await session.wait_closed()
+                with pytest.raises(
+                    (web_transport.SessionTimeout, web_transport.SessionClosed)
+                ):
+                    session.send_datagram(b"hello")
+
+        await asyncio.gather(
+            asyncio.create_task(server_task()),
+            asyncio.create_task(client_task()),
+        )
+
+
+@pytest.mark.asyncio
+async def test_receive_datagram_after_timeout(self_signed_cert, cert_hash):
+    """receive_datagram() after idle timeout -> SessionTimeout or SessionClosed."""
+    cert, key = self_signed_cert
+
+    async with web_transport.Server(
+        certificate_chain=[cert],
+        private_key=key,
+        bind="[::1]:0",
+        max_idle_timeout=0.5,
+    ) as server:
+        _, port = server.local_addr
+
+        async def server_task():
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            await session.wait_closed()
+
+        async def client_task():
+            async with web_transport.Client(
+                server_certificate_hashes=[cert_hash],
+                max_idle_timeout=0.5,
+            ) as client:
+                session = await client.connect(f"https://[::1]:{port}")
+                await session.wait_closed()
+                with pytest.raises(
+                    (web_transport.SessionTimeout, web_transport.SessionClosed)
+                ):
+                    await session.receive_datagram()
+
+        await asyncio.gather(
+            asyncio.create_task(server_task()),
+            asyncio.create_task(client_task()),
+        )
+
+
+@pytest.mark.asyncio
 async def test_idle_timeout_disabled(self_signed_cert, cert_hash):
     """max_idle_timeout=None -> alive after 2s."""
     cert, key = self_signed_cert

@@ -457,3 +457,58 @@ async def test_double_finish_raises(session_pair):
     await send.finish()
     with pytest.raises(web_transport.StreamClosedLocally):
         await send.finish()
+
+
+@pytest.mark.asyncio
+async def test_finish_after_reset_raises(session_pair):
+    """reset() then finish() -> StreamClosedLocally (cancellation token fires)."""
+    _server_session, client_session = session_pair
+
+    send, _recv = await client_session.open_bi()
+    send.reset()
+    with pytest.raises(web_transport.StreamClosedLocally):
+        await send.finish()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_iteration(session_pair):
+    """stop() interrupts async for on recv -> StreamClosedLocally."""
+    server_session, client_session = session_pair
+
+    _send, recv = await client_session.open_bi()
+
+    # Accept stream but don't write anything — iterator will block
+    async def server_side():
+        _send_s, _recv_s = await server_session.accept_bi()
+        await asyncio.sleep(2.0)
+
+    server_task = asyncio.create_task(server_side())
+
+    async def iterate():
+        with pytest.raises(web_transport.StreamClosedLocally):
+            async for _chunk in recv:
+                pass
+
+    iter_task = asyncio.create_task(iterate())
+    await asyncio.sleep(0.1)
+    recv.stop()
+    await asyncio.wait_for(iter_task, timeout=5.0)
+    server_task.cancel()
+    try:
+        await server_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_read_zero_after_stop_raises(session_pair):
+    """read(0) after stop() -> StreamClosedLocally (cancellation fires even for n=0)."""
+    _server_session, client_session = session_pair
+
+    _send, recv = await client_session.open_bi()
+    recv.stop()
+
+    # read(0) enters cancellable_read, where the biased select sees the
+    # cancellation token first, so it raises StreamClosedLocally.
+    with pytest.raises(web_transport.StreamClosedLocally):
+        await recv.read(0)

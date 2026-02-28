@@ -371,3 +371,99 @@ async def test_empty_write(session_pair):
     send, _recv = await client_session.open_bi()
     await send.write(b"")
     await send.finish()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_bidi_io(session_pair):
+    """Simultaneous send.write() and recv.read() on same bidi stream."""
+    server_session, client_session = session_pair
+
+    async def server_side():
+        send_s, recv_s = await server_session.accept_bi()
+        # Echo: read all then write all
+        data = await recv_s.read()
+        async with send_s:
+            await send_s.write(data)
+
+    server_task = asyncio.create_task(server_side())
+
+    send, recv = await client_session.open_bi()
+
+    # Run write and read concurrently on the same stream pair
+    async def do_write():
+        async with send:
+            await send.write(b"concurrent data")
+
+    async def do_read():
+        return await recv.read()
+
+    write_task = asyncio.create_task(do_write())
+    read_task = asyncio.create_task(do_read())
+
+    await write_task
+    result = await read_task
+    assert result == b"concurrent data"
+    await server_task
+
+
+@pytest.mark.asyncio
+async def test_read_n_ignores_limit(session_pair):
+    """read(5, limit=2) reads up to 5 bytes — limit is only used for read-to-EOF."""
+    server_session, client_session = session_pair
+
+    async def server_side():
+        send, _recv = await server_session.accept_bi()
+        async with send:
+            await send.write(b"hello world")
+
+    _send, recv = await client_session.open_bi()
+    task = asyncio.create_task(server_side())
+
+    # limit is silently ignored when n > 0
+    data = await recv.read(5, limit=2)
+    assert len(data) <= 5
+    assert len(data) > 0
+    await task
+
+
+@pytest.mark.asyncio
+async def test_write_some_correctness(session_pair):
+    """write_some() return value matches bytes actually received by peer."""
+    server_session, client_session = session_pair
+
+    async def server_side():
+        _send_s, recv_s = await server_session.accept_bi()
+        return await recv_s.read()
+
+    server_task = asyncio.create_task(server_side())
+
+    send, _recv = await client_session.open_bi()
+    payload = b"hello world test data"
+    n = await send.write_some(payload)
+    assert 0 < n <= len(payload)
+    await send.finish()
+
+    received = await asyncio.wait_for(server_task, timeout=5.0)
+    assert received == payload[:n]
+
+
+@pytest.mark.asyncio
+async def test_readexactly_zero_after_eof(session_pair):
+    """readexactly(0) returns b"" even after EOF."""
+    server_session, client_session = session_pair
+
+    async def server_side():
+        send, _recv = await server_session.accept_bi()
+        await send.finish()
+
+    _send, recv = await client_session.open_bi()
+    task = asyncio.create_task(server_side())
+
+    # Read until EOF
+    data = await recv.read()
+    assert data == b""
+
+    # readexactly(0) should return b"" even after EOF
+    data2 = await recv.readexactly(0)
+    assert data2 == b""
+    await task

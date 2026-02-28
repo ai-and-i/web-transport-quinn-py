@@ -1,4 +1,12 @@
+import pytest
+
 import web_transport
+
+
+def test_generate_self_signed_empty_sans():
+    """generate_self_signed([]) -> ValueError."""
+    with pytest.raises(ValueError, match="must not be empty"):
+        web_transport.generate_self_signed([])
 
 
 def test_generate_self_signed_returns_bytes():

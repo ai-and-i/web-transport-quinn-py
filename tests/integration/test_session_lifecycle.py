@@ -167,6 +167,31 @@ async def test_session_context_manager_closes_on_exception(self_signed_cert, cer
 
 
 @pytest.mark.asyncio
+async def test_session_close_max_code(session_pair):
+    """close(2**32 - 1) with max u32 code succeeds and is observed by peer."""
+    server_session, client_session = session_pair
+
+    async def accept_side():
+        with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
+            await server_session.accept_bi()
+        assert exc_info.value.code == 2**32 - 1
+
+    task = asyncio.create_task(accept_side())
+    await asyncio.sleep(0.05)
+    client_session.close(2**32 - 1, "max code")
+    await asyncio.wait_for(task, timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_session_close_code_overflow(session_pair):
+    """close(2**32) -> OverflowError (u32 overflow)."""
+    _server_session, client_session = session_pair
+
+    with pytest.raises(OverflowError):
+        client_session.close(2**32)
+
+
+@pytest.mark.asyncio
 async def test_open_stream_after_close(session_pair):
     """close() then open_bi() -> SessionClosedLocally."""
     _server_session, client_session = session_pair
