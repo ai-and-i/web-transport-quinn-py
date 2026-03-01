@@ -217,9 +217,22 @@ pub fn map_send_datagram_error(err: quinn::SendDatagramError) -> PyErr {
 }
 
 /// Map a `web_transport_quinn::ClientError` to a Python exception.
+///
+/// This is only called from `Client.connect()`, so connection-level
+/// errors that would be `ProtocolError` on an established session
+/// (e.g. TLS handshake failure, version mismatch) are mapped to
+/// `ConnectError` instead — the session was never established.
 pub fn map_client_error(err: web_transport_quinn::ClientError) -> PyErr {
     match err {
-        web_transport_quinn::ClientError::Connection(ce) => map_connection_error(ce),
+        web_transport_quinn::ClientError::Connection(ce) => match ce {
+            // These are connection establishment failures, not protocol
+            // violations on a live session, so map to ConnectError.
+            quinn::ConnectionError::TransportError(_)
+            | quinn::ConnectionError::VersionMismatch
+            | quinn::ConnectionError::CidsExhausted => ConnectError::new_err(ce.to_string()),
+            // All other ConnectionError variants keep their normal mapping.
+            other => map_connection_error(other),
+        },
         web_transport_quinn::ClientError::HttpError(ref he) => {
             ConnectError::new_err(he.to_string())
         }
