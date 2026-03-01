@@ -80,10 +80,18 @@ jobs:
         if: runner.os == 'Linux'
         run: uv run playwright install chromium --with-deps
 
-      - name: Python tests
+      - name: Python tests (10x flakiness check)
         if: runner.os == 'Linux'
-        run: uv run pytest
+        run: |
+          for i in $(seq 1 10); do
+            echo "=== Run $i/10 ==="
+            uv run pytest
+          done
 
-      - name: Python tests (skip browser interop)
+      - name: Python tests (skip browser interop, 10x flakiness check)
         if: runner.os != 'Linux'
-        run: uv run pytest tests/unit tests/integration
+        run: |
+          for i in $(seq 1 10); do
+            echo "=== Run $i/10 ==="
+            uv run pytest tests/unit tests/integration
+          done
