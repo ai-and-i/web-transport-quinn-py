@@ -482,6 +482,12 @@ class Session:
     async def open_bi(self) -> tuple[SendStream, RecvStream]:
         """Open a new bidirectional stream.
 
+        Stream creation is a local operation — this method does not wait
+        for the peer to call :meth:`accept_bi`.  The returned streams are
+        immediately usable: :meth:`~SendStream.write`,
+        :meth:`~SendStream.finish`, etc. all succeed regardless of whether
+        the peer has accepted the stream yet.
+
         Returns:
             A ``(send, recv)`` stream pair.
 
@@ -495,6 +501,12 @@ class Session:
 
     async def open_uni(self) -> SendStream:
         """Open a new unidirectional (send-only) stream.
+
+        Stream creation is a local operation — this method does not wait
+        for the peer to call :meth:`accept_uni`.  The returned stream is
+        immediately usable: :meth:`~SendStream.write`,
+        :meth:`~SendStream.finish`, etc. all succeed regardless of whether
+        the peer has accepted the stream yet.
 
         Returns:
             A :class:`SendStream`.
@@ -670,7 +682,13 @@ class SendStream:
     async def write(self, data: bytes) -> None:
         """Write all data to the stream.
 
-        Blocks until all bytes have been delivered to the QUIC send buffer.
+        Blocks until all bytes have been accepted by the QUIC send buffer,
+        but does **not** wait for the data to be transmitted on the wire or
+        acknowledged by the peer.  If the connection is closed abruptly
+        after this method returns, the peer may not receive the data.
+        To ensure the peer has received everything, read an application-level
+        acknowledgement.
+
         If :meth:`reset` is called while this write is pending, the write
         is interrupted and raises :class:`StreamClosedLocally`.
 
@@ -696,6 +714,10 @@ class SendStream:
 
         Low-level API. May write fewer bytes than ``len(data)`` due to flow
         control. Prefer :meth:`write` unless you need fine-grained control.
+        Like :meth:`write`, this method only waits for the data to be
+        accepted by the QUIC send buffer — it does not wait for
+        transmission or acknowledgement by the peer.
+
         If :meth:`reset` is called while this write is pending, the write
         is interrupted and raises :class:`StreamClosedLocally`.
 
@@ -723,10 +745,11 @@ class SendStream:
         """Gracefully close the send side of the stream.
 
         Waits for any in-progress write to complete, then queues a QUIC
-        ``FIN`` for sending.  The frame is transmitted on the next I/O
-        cycle — this method does not wait for it to reach the peer.  If
-        the connection has already been lost, the frame is silently dropped
-        (no error is raised).
+        ``FIN`` for sending.  Like :meth:`write`, this method does not
+        wait for the ``FIN`` to be transmitted or acknowledged — if the
+        connection is closed abruptly after this returns, the peer may
+        not see the end-of-stream.  If the connection has already been
+        lost, the frame is silently dropped (no error is raised).
 
         Can be interrupted by :meth:`reset`, which causes both the pending
         write and this finish to raise :class:`StreamClosedLocally`.
