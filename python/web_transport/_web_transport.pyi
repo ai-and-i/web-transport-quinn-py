@@ -48,6 +48,7 @@ def certificate_hash(certificate_der: bytes) -> bytes:
 # WebTransportError                     Base for all web-transport errors
 # ├── SessionError                      Session-level failures
 # │   ├── ConnectError                  Failed to establish a session
+# │   │   └── SessionRejected           Server rejected with HTTP status (.status_code)
 # │   ├── SessionClosed                 Session closed (either side)
 # │   │   ├── SessionClosedByPeer       Peer closed (.source, .code?, .reason?)
 # │   │   └── SessionClosedLocally      Local side already closed the session
