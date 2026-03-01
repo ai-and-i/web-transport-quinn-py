@@ -37,6 +37,8 @@ async def session_pair(self_signed_cert, cert_hash):
 
     client_session.close()
     server_session.close()
+    await client_session.wait_closed()
+    await server_session.wait_closed()
     await client.__aexit__(None, None, None)
     await server.__aexit__(None, None, None)
 
@@ -77,5 +79,7 @@ async def connect_pair(cert, key, cert_hash, *, server_kwargs=None, client_kwarg
     finally:
         client_session.close()
         server_session.close()
+        await client_session.wait_closed()
+        await server_session.wait_closed()
         await client.__aexit__(None, None, None)
         await server.__aexit__(None, None, None)

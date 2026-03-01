@@ -46,7 +46,7 @@ async def test_session_close_reason_after_close(session_pair):
 
     reason = client_session.close_reason
     assert reason is not None
-    assert isinstance(reason, web_transport.SessionError)
+    assert isinstance(reason, web_transport.SessionClosedLocally)
 
 
 @pytest.mark.asyncio
@@ -80,6 +80,7 @@ async def test_session_remote_address(session_pair):
     assert len(addr) == 2
     host, port = addr
     assert isinstance(host, str)
+    assert host == "::1"
     assert isinstance(port, int)
     assert port > 0
 
@@ -87,6 +88,7 @@ async def test_session_remote_address(session_pair):
     assert isinstance(addr_s, tuple)
     host_s, port_s = addr_s
     assert isinstance(host_s, str)
+    assert host_s == "::1"
     assert isinstance(port_s, int)
     assert port_s > 0
 
@@ -118,7 +120,8 @@ async def test_session_context_manager_closes(self_signed_cert, cert_hash):
             # Wait for the client to close
             await session.wait_closed()
             reason = session.close_reason
-            assert reason is not None
+            assert isinstance(reason, web_transport.SessionClosedByPeer)
+            assert reason.source == "session"
 
         async def client_task():
             async with web_transport.Client(
@@ -150,14 +153,14 @@ async def test_session_context_manager_closes_on_exception(self_signed_cert, cer
             session = await request.accept()
             await session.wait_closed()
             reason = session.close_reason
-            assert reason is not None
+            assert isinstance(reason, web_transport.SessionClosedByPeer)
 
         async def client_task():
             async with web_transport.Client(
                 server_certificate_hashes=[cert_hash]
             ) as client:
                 session = await client.connect(f"https://[::1]:{port}")
-                with pytest.raises(RuntimeError):
+                with pytest.raises(RuntimeError, match="intentional"):
                     async with session:
                         raise RuntimeError("intentional")
 
@@ -190,7 +193,9 @@ async def test_session_close_code_overflow(session_pair):
     """close(2**32) -> OverflowError (u32 overflow)."""
     _server_session, client_session = session_pair
 
-    with pytest.raises(OverflowError):
+    with pytest.raises(
+        OverflowError, match="(u32|unsigned|out of range|can't convert)"
+    ):
         client_session.close(2**32)
 
 
@@ -232,7 +237,7 @@ async def test_send_datagram_after_close(session_pair):
     client_session.close()
     await client_session.wait_closed()
 
-    with pytest.raises(web_transport.SessionClosed):
+    with pytest.raises(web_transport.SessionClosedLocally):
         client_session.send_datagram(b"x")
 
 
@@ -288,6 +293,8 @@ async def test_session_close_is_idempotent(session_pair):
 
     client_session.close()
     client_session.close()  # Should not raise
+    await client_session.wait_closed()
+    assert client_session.close_reason is not None
 
 
 @pytest.mark.asyncio

@@ -216,10 +216,11 @@ async def test_send_context_manager_resets_on_exception(session_pair):
         with pytest.raises(web_transport.StreamClosedByPeer) as exc_info:
             await recv_s.read()
         assert exc_info.value.kind == "reset"
+        assert exc_info.value.code == 0
 
     task = asyncio.create_task(server_side())
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="intentional"):
         async with send:
             raise RuntimeError("intentional")
 
@@ -241,10 +242,11 @@ async def test_recv_context_manager_stops_on_exception(session_pair):
             for _ in range(100):
                 await send_s.write(b"x" * 1024)
         assert exc_info.value.kind == "stop"
+        assert exc_info.value.code == 0
 
     task = asyncio.create_task(server_side())
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="intentional"):
         async with recv:
             raise RuntimeError("intentional")
 
@@ -268,6 +270,7 @@ async def test_recv_context_manager_stops_if_not_at_eof(session_pair):
             for _ in range(100):
                 await send_s.write(b"x" * 1024)
         assert exc_info.value.kind == "stop"
+        assert exc_info.value.code == 0
 
     task = asyncio.create_task(server_side())
     await asyncio.sleep(0.05)
@@ -293,6 +296,9 @@ async def test_recv_context_manager_no_stop_at_eof(session_pair):
         async with send_s:
             await send_s.write(b"hello")
         # finish() was called via context manager, so client will see EOF
+        # Verify the stream closed cleanly (no STOP_SENDING from peer)
+        code = await send_s.wait_closed()
+        assert code is None  # None = clean finish acknowledged, not a stop code
 
     task = asyncio.create_task(server_side())
 
@@ -300,7 +306,7 @@ async def test_recv_context_manager_no_stop_at_eof(session_pair):
         data = await recv.read()
         assert data == b"hello"
 
-    await task  # Server task should complete without errors
+    await asyncio.wait_for(task, timeout=5.0)
 
 
 @pytest.mark.asyncio
@@ -531,6 +537,7 @@ async def test_peer_session_close_during_pending_read(session_pair):
 
     with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
         await recv.read()
+    assert exc_info.value.source == "session"
     assert exc_info.value.code == 1
     assert exc_info.value.reason == "going away"
 
@@ -557,6 +564,7 @@ async def test_peer_session_close_during_pending_write(session_pair):
         # Write enough to block on backpressure
         for _ in range(200):
             await send.write(b"x" * 65536)
+    assert exc_info.value.source == "session"
     assert exc_info.value.code == 2
     assert exc_info.value.reason == "closing"
 
@@ -712,8 +720,11 @@ async def test_send_wait_closed_session_closed_by_peer(session_pair):
 
     task = asyncio.create_task(server_side())
 
-    with pytest.raises(web_transport.SessionClosedByPeer):
+    with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
         await asyncio.wait_for(send.wait_closed(), timeout=5.0)
+    assert exc_info.value.source == "session"
+    assert exc_info.value.code == 0
+    assert exc_info.value.reason == "done"
     await task
 
 
@@ -816,6 +827,9 @@ async def test_recv_wait_closed_session_closed_by_peer(session_pair):
 
     task = asyncio.create_task(server_side())
 
-    with pytest.raises(web_transport.SessionClosedByPeer):
+    with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
         await asyncio.wait_for(recv.wait_closed(), timeout=5.0)
+    assert exc_info.value.source == "session"
+    assert exc_info.value.code == 0
+    assert exc_info.value.reason == "done"
     await task

@@ -144,7 +144,7 @@ async def test_double_accept_raises(self_signed_cert, cert_hash):
             request = await server.accept()
             assert request is not None
             await request.accept()
-            with pytest.raises(web_transport.SessionError):
+            with pytest.raises(web_transport.SessionError, match="already"):
                 await request.accept()
 
         async def client_task():
@@ -174,15 +174,16 @@ async def test_double_reject_raises(self_signed_cert, cert_hash):
             request = await server.accept()
             assert request is not None
             await request.reject()
-            with pytest.raises(web_transport.SessionError):
+            with pytest.raises(web_transport.SessionError, match="already"):
                 await request.accept()
 
         async def client_task():
             async with web_transport.Client(
                 server_certificate_hashes=[cert_hash]
             ) as client:
-                with pytest.raises(web_transport.ConnectError):
+                with pytest.raises(web_transport.SessionRejected) as exc_info:
                     await client.connect(f"https://[::1]:{port}")
+                assert exc_info.value.status_code == 404
 
         await asyncio.gather(
             asyncio.create_task(server_task()),
@@ -288,7 +289,7 @@ async def test_reject_invalid_status_code(self_signed_cert, cert_hash):
         async def server_task():
             request = await server.accept()
             assert request is not None
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="status"):
                 await request.reject(99)
 
         async def client_task():
@@ -299,7 +300,7 @@ async def test_reject_invalid_status_code(self_signed_cert, cert_hash):
                     await asyncio.wait_for(
                         client.connect(f"https://[::1]:{port}"), timeout=2.0
                     )
-                except Exception:
+                except (web_transport.ConnectError, asyncio.TimeoutError):
                     pass
 
         await asyncio.gather(

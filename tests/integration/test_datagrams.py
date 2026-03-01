@@ -24,6 +24,7 @@ async def test_datagram_roundtrip(self_signed_cert, cert_hash):
             session = await request.accept()
             async with session:
                 data = await session.receive_datagram()
+                assert data == b"ping"
                 session.send_datagram(data)
 
         async def client_task():
@@ -60,7 +61,8 @@ async def test_max_datagram_size(self_signed_cert, cert_hash):
             async with session:
                 size = session.max_datagram_size
                 assert isinstance(size, int)
-                assert size > 0
+                # QUIC guarantees ~1200 byte minimum MTU
+                assert size >= 1000, f"max_datagram_size unexpectedly small: {size}"
 
         async def client_task():
             async with web_transport.Client(
@@ -70,7 +72,7 @@ async def test_max_datagram_size(self_signed_cert, cert_hash):
                 async with session:
                     size = session.max_datagram_size
                     assert isinstance(size, int)
-                    assert size > 0
+                    assert size >= 1000, f"max_datagram_size unexpectedly small: {size}"
 
         await asyncio.gather(
             asyncio.create_task(server_task()),
@@ -84,8 +86,12 @@ async def test_datagram_too_large(session_pair):
     _server_session, client_session = session_pair
 
     max_size = client_session.max_datagram_size
-    oversized = b"x" * (max_size + 1)
 
+    # Exact max_size should succeed (boundary value)
+    client_session.send_datagram(b"x" * max_size)
+
+    # max_size + 1 should fail
+    oversized = b"x" * (max_size + 1)
     with pytest.raises(web_transport.DatagramTooLargeError):
         client_session.send_datagram(oversized)
 
@@ -137,6 +143,7 @@ async def test_datagram_binary_data(session_pair):
 
     async def server_side():
         data = await server_session.receive_datagram()
+        assert data == payload
         server_session.send_datagram(data)
 
     task = asyncio.create_task(server_side())

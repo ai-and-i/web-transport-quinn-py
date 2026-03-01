@@ -59,6 +59,7 @@ async def test_echo_unidirectional(self_signed_cert, cert_hash):
         async def server_task():
             request = await server.accept()
             assert request is not None
+            assert "localhost" in request.url or f"[::1]:{port}" in request.url
             session = await request.accept()
             async with session:
                 recv = await session.accept_uni()

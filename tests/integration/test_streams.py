@@ -22,11 +22,11 @@ async def test_write_some(session_pair):
     send, recv = await client_session.open_bi()
     n = await send.write_some(b"hello")
     assert isinstance(n, int)
-    assert n > 0
+    assert 0 < n <= len(b"hello")
     await send.finish()
 
     response = await recv.read()
-    assert response == b"hello"
+    assert b"hello".startswith(response)
     await server_task
 
 
@@ -34,10 +34,18 @@ async def test_write_some(session_pair):
 async def test_send_stream_context_manager_finish(session_pair):
     server_session, client_session = session_pair
 
+    async def server_side():
+        _send_s, recv_s = await server_session.accept_bi()
+        data = await recv_s.read()
+        assert data == b"test data"
+
+    task = asyncio.create_task(server_side())
+
     send, _recv = await client_session.open_bi()
     async with send:
         await send.write(b"test data")
-    # After clean exit, stream should be finished (no exception)
+    # After clean exit, stream should be finished — verify peer sees FIN + data
+    await asyncio.wait_for(task, timeout=5.0)
 
 
 @pytest.mark.asyncio
@@ -130,8 +138,8 @@ async def test_read_n_bytes(session_pair):
     task = asyncio.create_task(server_side())
 
     data = await recv.read(5)
-    assert len(data) <= 5
-    assert len(data) > 0
+    assert 0 < len(data) <= 5
+    assert b"hello world".startswith(data)
     await task
 
 
@@ -365,12 +373,20 @@ async def test_large_transfer(session_pair):
 
 @pytest.mark.asyncio
 async def test_empty_write(session_pair):
-    """write(b"") succeeds without error."""
-    _server_session, client_session = session_pair
+    """write(b"") succeeds without error and peer sees EOF with no data."""
+    server_session, client_session = session_pair
+
+    async def server_side():
+        _send_s, recv_s = await server_session.accept_bi()
+        data = await recv_s.read()
+        assert data == b""
+
+    task = asyncio.create_task(server_side())
 
     send, _recv = await client_session.open_bi()
     await send.write(b"")
     await send.finish()
+    await asyncio.wait_for(task, timeout=5.0)
 
 
 @pytest.mark.asyncio
@@ -421,8 +437,8 @@ async def test_read_n_ignores_limit(session_pair):
 
     # limit is silently ignored when n > 0
     data = await recv.read(5, limit=2)
-    assert len(data) <= 5
-    assert len(data) > 0
+    assert 0 < len(data) <= 5
+    assert b"hello world".startswith(data)
     await task
 
 
@@ -590,7 +606,8 @@ async def test_rapid_open_close_streams(session_pair):
         for _ in range(10):
             send, recv = await server_session.accept_bi()
             async with send:
-                await recv.read()
+                data = await recv.read()
+                assert data == b""  # Client sent finish() immediately, no data
         server_session.close()
 
     server_task = asyncio.create_task(server_side())
@@ -707,19 +724,35 @@ async def test_multiple_uni_streams(session_pair):
 
 @pytest.mark.asyncio
 async def test_open_bi_write_finish_without_accept(session_pair):
-    """open_bi + write + finish succeed without peer calling accept_bi."""
-    _server_session, client_session = session_pair
+    """open_bi + write + finish succeed without peer calling accept_bi.
+
+    After finish, the peer can still accept and read the data.
+    """
+    server_session, client_session = session_pair
 
     send, _recv = await client_session.open_bi()
     await send.write(b"hello")
     await send.finish()
 
+    # Now accept and verify the data was buffered
+    _send_s, recv_s = await server_session.accept_bi()
+    data = await recv_s.read()
+    assert data == b"hello"
+
 
 @pytest.mark.asyncio
 async def test_open_uni_write_finish_without_accept(session_pair):
-    """open_uni + write + finish succeed without peer calling accept_uni."""
-    _server_session, client_session = session_pair
+    """open_uni + write + finish succeed without peer calling accept_uni.
+
+    After finish, the peer can still accept and read the data.
+    """
+    server_session, client_session = session_pair
 
     send = await client_session.open_uni()
     await send.write(b"hello")
     await send.finish()
+
+    # Now accept and verify the data was buffered
+    recv_s = await server_session.accept_uni()
+    data = await recv_s.read()
+    assert data == b"hello"

@@ -11,7 +11,7 @@ import web_transport
 async def test_connect_invalid_url(cert_hash):
     """connect("not-a-url") -> ValueError."""
     async with web_transport.Client(server_certificate_hashes=[cert_hash]) as client:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="url|URL"):
             await client.connect("not-a-url")
 
 
@@ -48,7 +48,7 @@ async def test_connect_wrong_cert_hash(self_signed_cert):
         server_t.cancel()
         try:
             await server_t
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
             pass
 
 
@@ -83,7 +83,7 @@ async def test_connect_after_close(self_signed_cert, cert_hash):
             server_certificate_hashes=[cert_hash]
         ) as client:
             client.close()
-            with pytest.raises(Exception):
+            with pytest.raises(web_transport.ConnectError):
                 await client.connect(f"https://[::1]:{port}")
 
 
@@ -106,7 +106,7 @@ async def test_no_cert_verification_mode(self_signed_cert):
         async def client_task():
             async with web_transport.Client(no_cert_verification=True) as client:
                 session = await client.connect(f"https://[::1]:{port}")
-                assert session is not None
+                assert isinstance(session, web_transport.Session)
                 session.close()
 
         await asyncio.gather(
@@ -140,7 +140,7 @@ async def test_congestion_throughput(self_signed_cert, cert_hash):
                 congestion_control="throughput",
             ) as client:
                 session = await client.connect(f"https://[::1]:{port}")
-                assert session is not None
+                assert isinstance(session, web_transport.Session)
                 session.close()
 
         await asyncio.gather(
@@ -174,7 +174,7 @@ async def test_congestion_low_latency(self_signed_cert, cert_hash):
                 congestion_control="low_latency",
             ) as client:
                 session = await client.connect(f"https://[::1]:{port}")
-                assert session is not None
+                assert isinstance(session, web_transport.Session)
                 session.close()
 
         await asyncio.gather(
@@ -202,8 +202,15 @@ async def test_idle_timeout_fires(self_signed_cert, cert_hash):
             session = await request.accept()
             await asyncio.wait_for(session.wait_closed(), timeout=5.0)
             reason = session.close_reason
+            # May be SessionTimeout (detected locally), SessionClosedLocally
+            # (timeout closed it), or SessionClosedByPeer (peer timed out first)
             assert isinstance(
-                reason, (web_transport.SessionTimeout, web_transport.SessionClosed)
+                reason,
+                (
+                    web_transport.SessionTimeout,
+                    web_transport.SessionClosedByPeer,
+                    web_transport.SessionClosedLocally,
+                ),
             )
 
         async def client_task():
@@ -217,7 +224,11 @@ async def test_idle_timeout_fires(self_signed_cert, cert_hash):
                 reason = session.close_reason
                 assert isinstance(
                     reason,
-                    (web_transport.SessionTimeout, web_transport.SessionClosed),
+                    (
+                        web_transport.SessionTimeout,
+                        web_transport.SessionClosedByPeer,
+                        web_transport.SessionClosedLocally,
+                    ),
                 )
 
         await asyncio.gather(
@@ -305,7 +316,7 @@ async def test_open_bi_after_timeout(self_signed_cert, cert_hash):
                 session = await client.connect(f"https://[::1]:{port}")
                 await session.wait_closed()
                 with pytest.raises(
-                    (web_transport.SessionTimeout, web_transport.SessionClosed)
+                    (web_transport.SessionTimeout, web_transport.SessionClosedLocally)
                 ):
                     await session.open_bi()
 
@@ -342,7 +353,7 @@ async def test_open_uni_after_timeout(self_signed_cert, cert_hash):
                 session = await client.connect(f"https://[::1]:{port}")
                 await session.wait_closed()
                 with pytest.raises(
-                    (web_transport.SessionTimeout, web_transport.SessionClosed)
+                    (web_transport.SessionTimeout, web_transport.SessionClosedLocally)
                 ):
                     await session.open_uni()
 
@@ -379,7 +390,7 @@ async def test_send_datagram_after_timeout(self_signed_cert, cert_hash):
                 session = await client.connect(f"https://[::1]:{port}")
                 await session.wait_closed()
                 with pytest.raises(
-                    (web_transport.SessionTimeout, web_transport.SessionClosed)
+                    (web_transport.SessionTimeout, web_transport.SessionClosedLocally)
                 ):
                     session.send_datagram(b"hello")
 
@@ -416,7 +427,7 @@ async def test_receive_datagram_after_timeout(self_signed_cert, cert_hash):
                 session = await client.connect(f"https://[::1]:{port}")
                 await session.wait_closed()
                 with pytest.raises(
-                    (web_transport.SessionTimeout, web_transport.SessionClosed)
+                    (web_transport.SessionTimeout, web_transport.SessionClosedLocally)
                 ):
                     await session.receive_datagram()
 
