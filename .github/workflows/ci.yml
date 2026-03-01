@@ -90,6 +90,7 @@ jobs:
 
       - name: Python tests (skip browser interop, 10x flakiness check)
         if: runner.os != 'Linux'
+        shell: bash
         run: |
           for i in $(seq 1 10); do
             echo "=== Run $i/10 ==="
