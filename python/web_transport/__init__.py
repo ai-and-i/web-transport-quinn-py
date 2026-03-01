@@ -4,6 +4,7 @@ from web_transport._crypto import certificate_hash, generate_self_signed
 from web_transport._web_transport import (
     Client,
     ConnectError,
+    SessionRejected,
     DatagramError,
     DatagramNotSupportedError,
     DatagramTooLargeError,
@@ -33,6 +34,7 @@ __all__ = [
     "WebTransportError",
     "SessionError",
     "ConnectError",
+    "SessionRejected",
     "SessionClosed",
     "SessionClosedByPeer",
     "SessionClosedLocally",

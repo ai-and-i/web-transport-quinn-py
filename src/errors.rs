@@ -12,6 +12,7 @@ create_exception!(_web_transport, WebTransportError, PyException);
 // -- Session errors ---------------------------------------------------------
 create_exception!(_web_transport, SessionError, WebTransportError);
 create_exception!(_web_transport, ConnectError, SessionError);
+create_exception!(_web_transport, SessionRejected, ConnectError);
 create_exception!(_web_transport, SessionClosed, SessionError);
 create_exception!(_web_transport, SessionClosedByPeer, SessionClosed);
 create_exception!(_web_transport, SessionClosedLocally, SessionClosed);
@@ -81,6 +82,14 @@ pub fn new_stream_incomplete_read_error(expected: usize, partial: &[u8]) -> PyEr
     set_attrs(&err, |val| {
         let _ = val.setattr("expected", expected);
         let _ = val.setattr("partial", &*partial);
+    });
+    err
+}
+
+pub fn new_session_rejected(status_code: u16, msg: String) -> PyErr {
+    let err = SessionRejected::new_err(msg);
+    set_attrs(&err, |val| {
+        let _ = val.setattr("status_code", status_code);
     });
     err
 }
@@ -218,33 +227,20 @@ pub fn map_send_datagram_error(err: quinn::SendDatagramError) -> PyErr {
 
 /// Map a `web_transport_quinn::ClientError` to a Python exception.
 ///
-/// This is only called from `Client.connect()`, so connection-level
-/// errors that would be `ProtocolError` on an established session
-/// (e.g. TLS handshake failure, version mismatch) are mapped to
-/// `ConnectError` instead — the session was never established.
+/// This is only called from `Client.connect()`, so every error is
+/// mapped to `ConnectError` (or its subclass `SessionRejected`) —
+/// the session was never established, and error types like
+/// `SessionTimeout` or `SessionClosedByPeer` would be misleading
+/// when no session exists yet.
 pub fn map_client_error(err: web_transport_quinn::ClientError) -> PyErr {
-    match err {
-        web_transport_quinn::ClientError::Connection(ce) => match ce {
-            // These are connection establishment failures, not protocol
-            // violations on a live session, so map to ConnectError.
-            quinn::ConnectionError::TransportError(_)
-            | quinn::ConnectionError::VersionMismatch
-            | quinn::ConnectionError::CidsExhausted => ConnectError::new_err(ce.to_string()),
-            // All other ConnectionError variants keep their normal mapping.
-            other => map_connection_error(other),
-        },
-        web_transport_quinn::ClientError::HttpError(ref he) => {
-            ConnectError::new_err(he.to_string())
-        }
-        web_transport_quinn::ClientError::InvalidDnsName(ref name) => {
-            ConnectError::new_err(format!("invalid DNS name: {name}"))
-        }
-        web_transport_quinn::ClientError::UnexpectedEnd
-        | web_transport_quinn::ClientError::WriteError(_)
-        | web_transport_quinn::ClientError::ReadError(_)
-        | web_transport_quinn::ClientError::SettingsError(_)
-        | web_transport_quinn::ClientError::QuinnError(_)
-        | web_transport_quinn::ClientError::Rustls(_) => ConnectError::new_err(err.to_string()),
+    match &err {
+        // Server rejected the session with a non-200 HTTP status code.
+        web_transport_quinn::ClientError::HttpError(
+            web_transport_quinn::ConnectError::ProtoError(
+                web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)),
+            ),
+        ) => new_session_rejected(status.as_u16(), err.to_string()),
+        _ => ConnectError::new_err(err.to_string()),
     }
 }
 
@@ -267,6 +263,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("WebTransportError", m.py().get_type::<WebTransportError>())?;
     m.add("SessionError", m.py().get_type::<SessionError>())?;
     m.add("ConnectError", m.py().get_type::<ConnectError>())?;
+    m.add("SessionRejected", m.py().get_type::<SessionRejected>())?;
     m.add("SessionClosed", m.py().get_type::<SessionClosed>())?;
     m.add(
         "SessionClosedByPeer",

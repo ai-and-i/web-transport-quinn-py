@@ -237,10 +237,19 @@ impl SessionRequest {
         let status = http::StatusCode::from_u16(status_code)
             .map_err(|e| PyValueError::new_err(format!("invalid status code: {e}")))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            request
-                .reject(status)
+            // Use respond() instead of reject() so we get back a Session that
+            // keeps the QUIC connection alive.  reject() drops the connection
+            // immediately, which can trigger an implicit CONNECTION_CLOSE
+            // before the rejection response is transmitted to the peer.
+            let session = request
+                .respond(status)
                 .await
                 .map_err(errors::map_server_error)?;
+            // Close from our side so we don't block on client behavior.
+            // The QUIC draining period ensures the rejection response is
+            // transmitted alongside the CONNECTION_CLOSE.
+            session.close(0, b"");
+            session.closed().await;
             Ok(())
         })
     }

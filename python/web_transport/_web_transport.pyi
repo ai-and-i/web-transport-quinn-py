@@ -81,6 +81,19 @@ class ConnectError(SessionError):
 
     ...
 
+class SessionRejected(ConnectError):
+    """The server rejected the WebTransport session request.
+
+    Raised when the server responds to the HTTP/3 extended CONNECT
+    request with a non-200 status code (e.g. 403, 404).
+
+    Attributes:
+        status_code: The HTTP status code returned by the server.
+    """
+
+    status_code: int
+    ...
+
 class SessionClosed(SessionError):
     """The session was closed (by either side).
 
