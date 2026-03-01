@@ -512,3 +512,103 @@ async def test_read_zero_after_stop_raises(session_pair):
     # cancellation token first, so it raises StreamClosedLocally.
     with pytest.raises(web_transport.StreamClosedLocally):
         await recv.read(0)
+
+
+@pytest.mark.asyncio
+async def test_peer_session_close_during_pending_read(session_pair):
+    """Peer closes session while recv.read() is awaited -> error or EOF."""
+    server_session, client_session = session_pair
+
+    _send, recv = await client_session.open_bi()
+
+    async def server_side():
+        _send_s, _recv_s = await server_session.accept_bi()
+        await asyncio.sleep(0.1)
+        server_session.close(1, "going away")
+        await server_session.wait_closed()
+
+    task = asyncio.create_task(server_side())
+
+    with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
+        await recv.read()
+    assert exc_info.value.code == 1
+    assert exc_info.value.reason == "going away"
+
+    await task
+
+
+@pytest.mark.asyncio
+async def test_peer_session_close_during_pending_write(session_pair):
+    """Peer closes session while send.write() is blocked -> error."""
+    server_session, client_session = session_pair
+
+    send, _recv = await client_session.open_bi()
+
+    async def server_side():
+        _send_s, _recv_s = await server_session.accept_bi()
+        # Don't read — create backpressure, then close session
+        await asyncio.sleep(0.1)
+        server_session.close(2, "closing")
+        await server_session.wait_closed()
+
+    task = asyncio.create_task(server_side())
+
+    with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
+        # Write enough to block on backpressure
+        for _ in range(200):
+            await send.write(b"x" * 65536)
+    assert exc_info.value.code == 2
+    assert exc_info.value.reason == "closing"
+
+    await task
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_readexactly(session_pair):
+    """stop() interrupts pending readexactly() -> StreamClosedLocally."""
+    server_session, client_session = session_pair
+
+    _send, recv = await client_session.open_bi()
+
+    # Accept stream but don't write anything — readexactly will block
+    async def server_side():
+        _send_s, _recv_s = await server_session.accept_bi()
+        await asyncio.sleep(2.0)
+
+    server_task = asyncio.create_task(server_side())
+
+    async def read_pending():
+        with pytest.raises(web_transport.StreamClosedLocally):
+            await recv.readexactly(100)
+
+    read_task = asyncio.create_task(read_pending())
+    await asyncio.sleep(0.1)
+    recv.stop()
+    await asyncio.wait_for(read_task, timeout=5.0)
+    server_task.cancel()
+    try:
+        await server_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_write_some_after_finish_raises(session_pair):
+    """finish() then write_some() -> StreamClosedLocally."""
+    _server_session, client_session = session_pair
+
+    send, _recv = await client_session.open_bi()
+    await send.finish()
+    with pytest.raises(web_transport.StreamClosedLocally):
+        await send.write_some(b"x")
+
+
+@pytest.mark.asyncio
+async def test_write_some_after_reset_raises(session_pair):
+    """reset() then write_some() -> StreamClosedLocally."""
+    _server_session, client_session = session_pair
+
+    send, _recv = await client_session.open_bi()
+    send.reset()
+    with pytest.raises(web_transport.StreamClosedLocally):
+        await send.write_some(b"x")

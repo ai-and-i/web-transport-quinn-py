@@ -74,7 +74,7 @@ async def test_server_local_addr(self_signed_cert):
 
 @pytest.mark.asyncio
 async def test_reject_session_request(self_signed_cert, cert_hash):
-    """request.reject(403) -> client's connect() raises ConnectError."""
+    """request.reject(403) -> client's connect() raises SessionRejected."""
     cert, key = self_signed_cert
 
     async with web_transport.Server(
@@ -91,8 +91,9 @@ async def test_reject_session_request(self_signed_cert, cert_hash):
             async with web_transport.Client(
                 server_certificate_hashes=[cert_hash]
             ) as client:
-                with pytest.raises(web_transport.ConnectError):
+                with pytest.raises(web_transport.SessionRejected) as exc_info:
                     await client.connect(f"https://[::1]:{port}")
+                assert exc_info.value.status_code == 403
 
         await asyncio.gather(
             asyncio.create_task(server_task()),
@@ -119,8 +120,9 @@ async def test_reject_with_default_status(self_signed_cert, cert_hash):
             async with web_transport.Client(
                 server_certificate_hashes=[cert_hash]
             ) as client:
-                with pytest.raises(web_transport.ConnectError):
+                with pytest.raises(web_transport.SessionRejected) as exc_info:
                     await client.connect(f"https://[::1]:{port}")
+                assert exc_info.value.status_code == 404
 
         await asyncio.gather(
             asyncio.create_task(server_task()),
@@ -261,8 +263,11 @@ async def test_server_close_with_code(self_signed_cert, cert_hash):
                 server_certificate_hashes=[cert_hash]
             ) as client:
                 session = await client.connect(f"https://[::1]:{port}")
-                with pytest.raises(web_transport.SessionClosedByPeer):
+                with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
                     await session.accept_bi()
+                assert exc_info.value.source == "session"
+                assert exc_info.value.code == 42
+                assert exc_info.value.reason == "shutting down"
 
         await asyncio.gather(
             asyncio.create_task(server_task()),
@@ -347,3 +352,44 @@ async def test_server_wait_closed(self_signed_cert):
     server.close()
     await asyncio.wait_for(server.wait_closed(), timeout=5.0)
     await server.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_server_close_propagates_as_application(self_signed_cert, cert_hash):
+    """server.close(code) -> client sees SessionClosedByPeer(source='application')."""
+    cert, key = self_signed_cert
+
+    async with web_transport.Server(
+        certificate_chain=[cert], private_key=key, bind="[::1]:0"
+    ) as server:
+        _, port = server.local_addr
+
+        async def server_task():
+            request = await server.accept()
+            assert request is not None
+            await request.accept()
+            await asyncio.sleep(0.1)
+            # Close the entire server endpoint (not just the session)
+            server.close(42, "shutdown")
+            await server.wait_closed()
+
+        async def client_task():
+            async with web_transport.Client(
+                server_certificate_hashes=[cert_hash]
+            ) as client:
+                session = await client.connect(f"https://[::1]:{port}")
+                # Endpoint-level close (QUIC CONNECTION_CLOSE) is inherently
+                # racy — the CLOSE frame may not arrive before the connection
+                # drops, so the client may see SessionClosedLocally.
+                try:
+                    await session.accept_bi()
+                    pytest.fail("Expected an exception from accept_bi()")
+                except web_transport.SessionClosedByPeer as e:
+                    assert e.source == "application"
+                except web_transport.SessionClosedLocally:
+                    pass
+
+        await asyncio.gather(
+            asyncio.create_task(server_task()),
+            asyncio.create_task(client_task()),
+        )

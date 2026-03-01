@@ -17,7 +17,7 @@ async def test_connect_invalid_url(cert_hash):
 
 @pytest.mark.asyncio
 async def test_connect_wrong_cert_hash(self_signed_cert):
-    """Wrong server_certificate_hashes -> ConnectError or ProtocolError."""
+    """Wrong server_certificate_hashes -> ConnectError."""
     cert, key = self_signed_cert
 
     async with web_transport.Server(
@@ -34,10 +34,9 @@ async def test_connect_wrong_cert_hash(self_signed_cert):
             async with web_transport.Client(
                 server_certificate_hashes=[wrong_hash]
             ) as client:
-                with pytest.raises(
-                    (web_transport.ConnectError, web_transport.ProtocolError)
-                ):
+                with pytest.raises(web_transport.ConnectError) as exc_info:
                     await client.connect(f"https://[::1]:{port}")
+                assert not isinstance(exc_info.value, web_transport.SessionRejected)
 
         server_t = asyncio.create_task(server_task())
         client_t = asyncio.create_task(client_task())
@@ -55,12 +54,15 @@ async def test_connect_wrong_cert_hash(self_signed_cert):
 
 @pytest.mark.asyncio
 async def test_connect_no_server():
-    """Connect to port with no listener -> ConnectError or timeout."""
+    """Connect to port with no listener -> ConnectError or asyncio timeout."""
     async with web_transport.Client(
         server_certificate_hashes=[b"\x00" * 32],
-        max_idle_timeout=1.0,
+        max_idle_timeout=0.5,
     ) as client:
-        with pytest.raises((web_transport.ConnectError, web_transport.SessionTimeout)):
+        # max_idle_timeout only applies to established connections, not to
+        # the initial QUIC handshake, so the connect may hang until the
+        # asyncio timeout fires.
+        with pytest.raises((web_transport.ConnectError,)):
             await asyncio.wait_for(
                 client.connect("https://[::1]:19999"),
                 timeout=5.0,
@@ -417,6 +419,48 @@ async def test_receive_datagram_after_timeout(self_signed_cert, cert_hash):
                     (web_transport.SessionTimeout, web_transport.SessionClosed)
                 ):
                     await session.receive_datagram()
+
+        await asyncio.gather(
+            asyncio.create_task(server_task()),
+            asyncio.create_task(client_task()),
+        )
+
+
+@pytest.mark.asyncio
+async def test_client_close_code_propagates_to_server(self_signed_cert, cert_hash):
+    """client.close(code) -> server sees session closure."""
+    cert, key = self_signed_cert
+
+    async with web_transport.Server(
+        certificate_chain=[cert], private_key=key, bind="[::1]:0"
+    ) as server:
+        _, port = server.local_addr
+
+        async def server_task():
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            # Endpoint-level close (QUIC CONNECTION_CLOSE) is inherently
+            # racy — the CLOSE frame may not arrive before the connection
+            # drops, so the server may see SessionClosedLocally.
+            try:
+                await session.accept_bi()
+                pytest.fail("Expected an exception from accept_bi()")
+            except web_transport.SessionClosedByPeer as e:
+                assert e.source == "application"
+            except web_transport.SessionClosedLocally:
+                pass
+
+        async def client_task():
+            client = web_transport.Client(
+                server_certificate_hashes=[cert_hash],
+            )
+            await client.__aenter__()
+            await client.connect(f"https://[::1]:{port}")
+            await asyncio.sleep(0.1)
+            # Close the client endpoint (not the session)
+            client.close(42, "client shutdown")
+            await client.wait_closed()
 
         await asyncio.gather(
             asyncio.create_task(server_task()),

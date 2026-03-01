@@ -23,6 +23,7 @@ async def test_session_close_with_code_and_reason(session_pair):
     task = asyncio.create_task(accept_side())
     await asyncio.sleep(0.05)
     client_session.close(42, "goodbye")
+    await client_session.wait_closed()
     await asyncio.wait_for(task, timeout=5.0)
 
 
@@ -175,10 +176,12 @@ async def test_session_close_max_code(session_pair):
         with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
             await server_session.accept_bi()
         assert exc_info.value.code == 2**32 - 1
+        assert exc_info.value.reason == "max code"
 
     task = asyncio.create_task(accept_side())
     await asyncio.sleep(0.05)
     client_session.close(2**32 - 1, "max code")
+    await client_session.wait_closed()
     await asyncio.wait_for(task, timeout=5.0)
 
 
@@ -209,12 +212,15 @@ async def test_accept_stream_after_peer_close(session_pair):
     server_session, client_session = session_pair
 
     async def accept_side():
-        with pytest.raises(web_transport.SessionClosedByPeer):
+        with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
             await server_session.accept_bi()
+        assert exc_info.value.source == "session"
+        assert exc_info.value.code == 0
 
     task = asyncio.create_task(accept_side())
     await asyncio.sleep(0.05)
     client_session.close()
+    await client_session.wait_closed()
     await asyncio.wait_for(task, timeout=5.0)
 
 
@@ -236,10 +242,79 @@ async def test_receive_datagram_after_peer_close(session_pair):
     server_session, client_session = session_pair
 
     async def recv_side():
-        with pytest.raises(web_transport.SessionClosedByPeer):
+        with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
             await server_session.receive_datagram()
+        assert exc_info.value.source == "session"
+        assert exc_info.value.code == 0
 
     task = asyncio.create_task(recv_side())
     await asyncio.sleep(0.05)
     client_session.close()
+    await client_session.wait_closed()
+    await asyncio.wait_for(task, timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_close_reason_attributes_from_peer(session_pair):
+    """close_reason returns SessionClosedByPeer with correct .source/.code/.reason."""
+    server_session, client_session = session_pair
+
+    client_session.close(42, "goodbye")
+    await server_session.wait_closed()
+
+    reason = server_session.close_reason
+    assert isinstance(reason, web_transport.SessionClosedByPeer)
+    assert reason.source == "session"
+    assert reason.code == 42
+    assert reason.reason == "goodbye"
+
+
+@pytest.mark.asyncio
+async def test_accept_bi_after_local_close(session_pair):
+    """close() then accept_bi() -> SessionClosedLocally."""
+    server_session, _client_session = session_pair
+
+    server_session.close()
+    await server_session.wait_closed()
+
+    with pytest.raises(web_transport.SessionClosedLocally):
+        await server_session.accept_bi()
+
+
+@pytest.mark.asyncio
+async def test_session_close_is_idempotent(session_pair):
+    """Calling session.close() twice does not raise."""
+    _server_session, client_session = session_pair
+
+    client_session.close()
+    client_session.close()  # Should not raise
+
+
+@pytest.mark.asyncio
+async def test_open_uni_after_close(session_pair):
+    """close() then open_uni() -> SessionClosedLocally."""
+    _server_session, client_session = session_pair
+
+    client_session.close()
+    await client_session.wait_closed()
+
+    with pytest.raises(web_transport.SessionClosedLocally):
+        await client_session.open_uni()
+
+
+@pytest.mark.asyncio
+async def test_accept_uni_after_peer_close(session_pair):
+    """Peer closes -> pending accept_uni() -> SessionClosedByPeer."""
+    server_session, client_session = session_pair
+
+    async def accept_side():
+        with pytest.raises(web_transport.SessionClosedByPeer) as exc_info:
+            await server_session.accept_uni()
+        assert exc_info.value.source == "session"
+        assert exc_info.value.code == 0
+
+    task = asyncio.create_task(accept_side())
+    await asyncio.sleep(0.05)
+    client_session.close()
+    await client_session.wait_closed()
     await asyncio.wait_for(task, timeout=5.0)
