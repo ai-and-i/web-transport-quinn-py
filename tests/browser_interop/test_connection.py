@@ -424,3 +424,226 @@ async def test_session_close_is_idempotent(
                 return true;
             """,
             )
+
+
+async def test_session_context_manager_closes(
+    start_server: ServerFactory, run_js_raw: RunJSRaw
+) -> None:
+    """async with session: clean exit closes the session → browser sees it."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                pass  # clean exit should close the session
+
+        setup = _webtransport_connect_js(port, hash_b64)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js_raw(f"""
+                {setup}
+                const transport = new WebTransport(url, transportOptions);
+                await transport.ready;
+                try {{
+                    const closed = await transport.closed;
+                    return {{ closed: true, closeCode: closed.closeCode }};
+                }} catch (e) {{
+                    return {{ closed: true, error: e.toString() }};
+                }}
+            """)
+
+    assert isinstance(result, dict)
+    assert result["closed"] is True
+
+
+async def test_session_context_manager_closes_on_exception(
+    start_server: ServerFactory, run_js_raw: RunJSRaw
+) -> None:
+    """Exception inside async with session: still closes the session."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            try:
+                async with session:
+                    raise RuntimeError("intentional")
+            except RuntimeError:
+                pass
+
+        setup = _webtransport_connect_js(port, hash_b64)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js_raw(f"""
+                {setup}
+                const transport = new WebTransport(url, transportOptions);
+                await transport.ready;
+                try {{
+                    await transport.closed;
+                    return {{ closed: true }};
+                }} catch (e) {{
+                    return {{ closed: true, error: e.toString() }};
+                }}
+            """)
+
+    assert isinstance(result, dict)
+    assert result["closed"] is True
+
+
+async def test_session_close_max_code(
+    start_server: ServerFactory, run_js_raw: RunJSRaw
+) -> None:
+    """Browser closes with code 2^32-1 → server sees the max u32 code."""
+    max_code = 2**32 - 1
+    async with start_server() as (server, port, hash_b64):
+        close_reason: web_transport.SessionError | None = None
+
+        async def server_side() -> None:
+            nonlocal close_reason
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            await session.wait_closed()
+            close_reason = session.close_reason
+
+        setup = _webtransport_connect_js(port, hash_b64)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js_raw(f"""
+                {setup}
+                const transport = new WebTransport(url, transportOptions);
+                await transport.ready;
+                transport.close({{closeCode: {max_code}, reason: "max"}});
+                await transport.closed;
+                return true;
+            """)
+
+    assert isinstance(close_reason, web_transport.SessionClosedByPeer)
+    assert close_reason.code == max_code
+    assert close_reason.reason == "max"
+
+
+async def test_session_wait_closed_blocks_until_browser_closes(
+    start_server: ServerFactory, run_js_raw: RunJSRaw
+) -> None:
+    """wait_closed() does not return until the browser calls transport.close()."""
+    async with start_server() as (server, port, hash_b64):
+        wait_closed_done = asyncio.Event()
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            await session.wait_closed()
+            wait_closed_done.set()
+
+        setup = _webtransport_connect_js(port, hash_b64)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js_raw(f"""
+                {setup}
+                const transport = new WebTransport(url, transportOptions);
+                await transport.ready;
+                // Wait a bit to prove wait_closed blocks
+                await new Promise(r => setTimeout(r, 300));
+                transport.close({{closeCode: 0, reason: ""}});
+                await transport.closed;
+                return true;
+            """)
+
+    assert result is True
+    assert wait_closed_done.is_set()
+
+
+async def test_open_uni_after_close_raises(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """session.close() then open_uni() raises SessionClosedLocally."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                session.close()
+                await session.wait_closed()
+                try:
+                    await session.open_uni()
+                except web_transport.SessionClosedLocally as e:
+                    error = e
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            try:
+                await run_js(port, hash_b64, "await transport.closed; return true;")
+            except Exception:
+                pass
+
+    assert isinstance(error, web_transport.SessionClosedLocally)
+
+
+async def test_accept_bi_after_local_close_raises(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """session.close() then accept_bi() raises SessionClosedLocally."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                session.close()
+                await session.wait_closed()
+                try:
+                    await session.accept_bi()
+                except web_transport.SessionClosedLocally as e:
+                    error = e
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            try:
+                await run_js(port, hash_b64, "await transport.closed; return true;")
+            except Exception:
+                pass
+
+    assert isinstance(error, web_transport.SessionClosedLocally)
+
+
+async def test_accept_uni_after_browser_close_raises(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Browser closes → pending accept_uni() raises SessionClosed."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            try:
+                await session.accept_uni()
+            except web_transport.SessionClosed as e:
+                error = e
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                transport.close({closeCode: 0, reason: ""});
+                return true;
+            """,
+            )
+
+    assert isinstance(error, web_transport.SessionClosed)

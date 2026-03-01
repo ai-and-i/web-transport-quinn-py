@@ -299,3 +299,566 @@ async def test_server_close_all_connections(
 
     assert isinstance(result, dict)
     assert result["closed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Stream state validation (server-side, browser-created stream)
+# ---------------------------------------------------------------------------
+
+
+async def test_double_reset_raises(start_server: ServerFactory, run_js: RunJS) -> None:
+    """send.reset() twice → StreamClosedLocally."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                send.reset()
+                try:
+                    send.reset()
+                except web_transport.StreamClosedLocally as e:
+                    error = e
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const writer = stream.writable.getWriter();
+                await writer.close();
+                return true;
+            """,
+            )
+
+    assert isinstance(error, web_transport.StreamClosedLocally)
+
+
+async def test_double_stop_raises(start_server: ServerFactory, run_js: RunJS) -> None:
+    """recv.stop() twice → StreamClosedLocally."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    recv.stop()
+                    try:
+                        recv.stop()
+                    except web_transport.StreamClosedLocally as e:
+                        error = e
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                try {
+                    const writer = stream.writable.getWriter();
+                    await writer.close();
+                } catch (e) {
+                    // should raise because of stop()
+                }
+                return true;
+            """,
+            )
+
+    assert isinstance(error, web_transport.StreamClosedLocally)
+
+
+async def test_write_after_reset_raises(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """send.reset() then send.write() → StreamClosedLocally."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                send.reset()
+                try:
+                    await send.write(b"x")
+                except web_transport.StreamClosedLocally as e:
+                    error = e
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const writer = stream.writable.getWriter();
+                await writer.close();
+                return true;
+            """,
+            )
+
+    assert isinstance(error, web_transport.StreamClosedLocally)
+
+
+async def test_write_after_finish_raises(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """send.finish() then send.write() → StreamClosedLocally."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                await send.finish()
+                try:
+                    await send.write(b"x")
+                except web_transport.StreamClosedLocally as e:
+                    error = e
+                await recv.read()
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                // Read server's finished stream
+                await readAll(stream.readable);
+                const writer = stream.writable.getWriter();
+                await writer.close();
+                return true;
+            """,
+            )
+
+    assert isinstance(error, web_transport.StreamClosedLocally)
+
+
+async def test_read_after_stop_raises(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """recv.stop() then recv.read() → StreamClosedLocally."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    recv.stop()
+                    try:
+                        await recv.read()
+                    except web_transport.StreamClosedLocally as e:
+                        error = e
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                try {
+                    const writer = stream.writable.getWriter();
+                    await writer.close();
+                    return true;
+                } catch (e) {
+                    // should raise because of stop()
+                }
+            """,
+            )
+
+    assert isinstance(error, web_transport.StreamClosedLocally)
+
+
+async def test_double_finish_raises(start_server: ServerFactory, run_js: RunJS) -> None:
+    """send.finish() twice → StreamClosedLocally."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                await send.finish()
+                try:
+                    await send.finish()
+                except web_transport.StreamClosedLocally as e:
+                    error = e
+                await recv.read()
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                await readAll(stream.readable);
+                const writer = stream.writable.getWriter();
+                await writer.close();
+                return true;
+            """,
+            )
+
+    assert isinstance(error, web_transport.StreamClosedLocally)
+
+
+# ---------------------------------------------------------------------------
+# Cross-boundary error propagation
+# ---------------------------------------------------------------------------
+
+
+async def test_browser_close_during_server_pending_read(
+    start_server: ServerFactory, run_js_raw: RunJSRaw
+) -> None:
+    """Browser close interrupts server recv.read() → SessionClosed."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    try:
+                        await recv.read()
+                    except (
+                        web_transport.SessionClosed,
+                        web_transport.StreamClosedByPeer,
+                    ) as e:
+                        error = e
+
+        setup = _webtransport_connect_js(port, hash_b64)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js_raw(f"""
+                {setup}
+                const transport = new WebTransport(url, transportOptions);
+                await transport.ready;
+                const stream = await transport.createBidirectionalStream();
+                // Don't write — just close the transport abruptly
+                await new Promise(r => setTimeout(r, 200));
+                transport.close({{closeCode: 1, reason: "abort"}});
+                await transport.closed;
+                return true;
+            """)
+
+    assert error is not None
+
+
+async def test_browser_close_during_server_pending_write(
+    start_server: ServerFactory, run_js_raw: RunJSRaw
+) -> None:
+    """Browser close interrupts server send.write() (backpressured)."""
+    async with start_server() as (server, port, hash_b64):
+        error: BaseException | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                try:
+                    # Write a lot — will block on backpressure
+                    for _ in range(200):
+                        await send.write(b"x" * 65536)
+                except (
+                    web_transport.SessionClosed,
+                    web_transport.StreamClosed,
+                ) as e:
+                    error = e
+
+        setup = _webtransport_connect_js(port, hash_b64)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js_raw(f"""
+                {setup}
+                const transport = new WebTransport(url, transportOptions);
+                await transport.ready;
+                const stream = await transport.createBidirectionalStream();
+                const reader = stream.readable.getReader();
+                // Read one chunk to let server start writing
+                await reader.read();
+                reader.releaseLock();
+                // Close transport while server is writing
+                transport.close({{closeCode: 2, reason: "closing"}});
+                await transport.closed;
+                return true;
+            """)
+
+    assert error is not None
+
+
+async def test_uni_send_reset(start_server: ServerFactory, run_js: RunJS) -> None:
+    """Server opens uni stream, writes partial, resets → browser read errors."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send = await session.open_uni()
+                await send.write(b"partial")
+                await asyncio.sleep(0.1)
+                send.reset(7)
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js(
+                port,
+                hash_b64,
+                """
+                const reader = transport.incomingUnidirectionalStreams.getReader();
+                const { value: stream } = await reader.read();
+                reader.releaseLock();
+                const streamReader = stream.getReader();
+                try {
+                    while (true) {
+                        const { value, done } = await streamReader.read();
+                        if (done) break;
+                    }
+                    return { errored: false };
+                } catch (e) {
+                    return { errored: true, message: e.toString() };
+                }
+            """,
+            )
+
+    assert isinstance(result, dict)
+    assert result["errored"] is True
+
+
+async def test_uni_recv_stop(start_server: ServerFactory, run_js: RunJS) -> None:
+    """Browser opens uni stream → server recv.stop(7) → browser write errors."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                recv = await session.accept_uni()
+                recv.stop(7)
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createUnidirectionalStream();
+                const writer = stream.getWriter();
+                // Give server time to send STOP_SENDING
+                await new Promise(r => setTimeout(r, 200));
+                try {
+                    // Write enough to trigger the error
+                    for (let i = 0; i < 10; i++) {
+                        await writer.write(new Uint8Array(65536));
+                    }
+                    return { errored: false };
+                } catch (e) {
+                    return { errored: true, message: e.toString() };
+                }
+            """,
+            )
+
+    assert isinstance(result, dict)
+    assert result["errored"] is True
+
+
+# ---------------------------------------------------------------------------
+# wait_closed() with browser peer
+# ---------------------------------------------------------------------------
+
+
+async def test_send_wait_closed_returns_stop_code(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Browser cancels reader → send.wait_closed() returns error code."""
+    async with start_server() as (server, port, hash_b64):
+        stop_code: int | None = -1  # sentinel
+
+        async def server_side() -> None:
+            nonlocal stop_code
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                stop_code = await asyncio.wait_for(send.wait_closed(), timeout=5.0)
+                await recv.read()
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const reader = stream.readable.getReader();
+                let err = new WebTransportError({ message: "stop", streamErrorCode: 42 });
+                await reader.cancel(err);
+                // Close writable so server can complete
+                const writer = stream.writable.getWriter();
+                await writer.close();
+                return true;
+            """,
+            )
+
+    assert stop_code == 42
+
+
+async def test_send_finish_then_wait_closed(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """finish() → browser reads → wait_closed() returns None."""
+    async with start_server() as (server, port, hash_b64):
+        result_code: int | None = -1  # sentinel
+
+        async def server_side() -> None:
+            nonlocal result_code
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                await send.write(b"data")
+                await send.finish()
+                result_code = await asyncio.wait_for(send.wait_closed(), timeout=5.0)
+                await recv.read()
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                // Read all data (acknowledges the stream)
+                await readAll(stream.readable);
+                // Close writable
+                const writer = stream.writable.getWriter();
+                await writer.close();
+                return true;
+            """,
+            )
+
+    assert result_code is None
+
+
+async def test_recv_wait_closed_returns_reset_code(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Browser aborts writer → recv.wait_closed() returns error code."""
+    async with start_server() as (server, port, hash_b64):
+        reset_code: int | None = -1  # sentinel
+
+        async def server_side() -> None:
+            nonlocal reset_code
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    reset_code = await asyncio.wait_for(recv.wait_closed(), timeout=5.0)
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const writer = stream.writable.getWriter();
+                await new Promise(r => setTimeout(r, 200));
+                let err = new WebTransportError({ message: "abort", streamErrorCode: 99 });
+                await writer.abort(err);
+                return true;
+            """,
+            )
+
+    assert reset_code == 99
+
+
+async def test_recv_wait_closed_peer_finishes(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Browser closes writer → recv.wait_closed() returns None."""
+    async with start_server() as (server, port, hash_b64):
+        result_code: int | None = -1  # sentinel
+
+        async def server_side() -> None:
+            nonlocal result_code
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    # Read all data first
+                    data = await recv.read()
+                    assert data == b"hello"
+                    result_code = await asyncio.wait_for(
+                        recv.wait_closed(), timeout=5.0
+                    )
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                await writeAllString(stream.writable, "hello");
+                return true;
+            """,
+            )
+
+    assert result_code is None

@@ -685,3 +685,274 @@ async def test_read_after_eof_returns_empty(
     assert reads[0] == b"x"
     assert reads[1] == b""
     assert reads[2] == b""
+
+
+async def test_empty_write_and_finish(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Server write(b'') + finish() → browser reads empty then EOF."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                await send.write(b"")
+                await send.finish()
+                await recv.read()  # wait for browser to close
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result = await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const data = await readAll(stream.readable);
+                const writer = stream.writable.getWriter();
+                await writer.close();
+                return data.length;
+            """,
+            )
+
+    assert result == 0
+
+
+async def test_read_all_to_eof_default(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Browser writes + closes → server recv.read() (no args) returns all data."""
+    async with start_server() as (server, port, hash_b64):
+        received: bytes = b""
+
+        async def server_side() -> None:
+            nonlocal received
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    received = await recv.read()
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                await writeAllString(stream.writable, "all-data-here");
+                return true;
+            """,
+            )
+
+    assert received == b"all-data-here"
+
+
+async def test_read_n_returns_less_at_eof(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Browser sends 5 bytes → server recv.read(1000) returns available bytes (<=5)."""
+    async with start_server() as (server, port, hash_b64):
+        all_received: bytes = b""
+
+        async def server_side() -> None:
+            nonlocal all_received
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    # Read with a large n — may return partial or all 5 bytes
+                    chunk = await recv.read(1000)
+                    assert 0 < len(chunk) <= 5
+                    all_received = chunk
+                    # Read remaining if any
+                    rest = await recv.read(1000)
+                    if rest:
+                        all_received += rest
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const payload = new Uint8Array([1, 2, 3, 4, 5]);
+                await writeAll(stream.writable, payload);
+                return true;
+            """,
+            )
+
+    # All data is eventually received, matching the sent payload
+    assert all_received == bytes([1, 2, 3, 4, 5])
+
+
+async def test_readexactly_after_eof(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """After EOF, readexactly(5) raises StreamIncompleteReadError(partial=b'')."""
+    async with start_server() as (server, port, hash_b64):
+        error: web_transport.StreamIncompleteReadError | None = None
+
+        async def server_side() -> None:
+            nonlocal error
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    # Read to EOF
+                    await recv.read()
+                    # Now readexactly should raise
+                    try:
+                        await recv.readexactly(5)
+                    except web_transport.StreamIncompleteReadError as e:
+                        error = e
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                await writeAllString(stream.writable, "data");
+                return true;
+            """,
+            )
+
+    assert error is not None
+    assert error.expected == 5
+    assert error.partial == b""
+
+
+async def test_readexactly_zero_after_eof(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """After EOF, readexactly(0) returns b'' (no error)."""
+    async with start_server() as (server, port, hash_b64):
+        result_bytes: bytes = b"sentinel"
+
+        async def server_side() -> None:
+            nonlocal result_bytes
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    # Read to EOF
+                    await recv.read()
+                    # readexactly(0) should succeed even after EOF
+                    result_bytes = await recv.readexactly(0)
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const writer = stream.writable.getWriter();
+                await writer.close();
+                return true;
+            """,
+            )
+
+    assert result_bytes == b""
+
+
+async def test_recv_context_manager_stops_on_exception(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """async with recv: raise → browser write fails (STOP_SENDING sent)."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    try:
+                        async with recv:
+                            await recv.read(10)
+                            raise RuntimeError("intentional")
+                    except RuntimeError:
+                        pass
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const writer = stream.writable.getWriter();
+                // Write initial data
+                await writer.write(new Uint8Array(20));
+                // Give server time to stop
+                await new Promise(r => setTimeout(r, 300));
+                try {
+                    // Try writing more — should eventually fail
+                    for (let i = 0; i < 10; i++) {
+                        await writer.write(new Uint8Array(65536));
+                    }
+                    return { errored: false };
+                } catch (e) {
+                    return { errored: true };
+                }
+            """,
+            )
+
+    assert isinstance(result, dict)
+    assert result["errored"] is True
+
+
+async def test_recv_context_manager_no_stop_at_eof(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Read all data inside async with recv: → clean exit, no STOP_SENDING."""
+    async with start_server() as (server, port, hash_b64):
+        received: bytes = b""
+
+        async def server_side() -> None:
+            nonlocal received
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                async with send:
+                    async with recv:
+                        received = await recv.read()
+                    # If no STOP_SENDING was sent, this is a clean exit
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                await writeAllString(stream.writable, "complete-data");
+                return true;
+            """,
+            )
+
+    assert received == b"complete-data"
