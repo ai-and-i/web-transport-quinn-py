@@ -203,4 +203,14 @@ impl RecvStream {
         }
         Ok(())
     }
+
+    /// Wait until the peer resets the stream or it is otherwise closed.
+    fn wait_closed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.cancellable_read(py, |mut guard| async move {
+            guard
+                .received_reset()
+                .await
+                .map_err(errors::map_session_error)
+        })
+    }
 }

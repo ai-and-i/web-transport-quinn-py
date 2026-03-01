@@ -764,6 +764,16 @@ class SendStream:
         not see the end-of-stream.  If the connection has already been
         lost, the frame is silently dropped (no error is raised).
 
+        To wait for the peer to receive the data, call
+        :meth:`wait_closed` after ``finish()``.  It returns ``None``
+        once the peer has acknowledged receipt of all stream data
+        (although not necessarily the processing of it).
+
+        For a variety of reasons, the peer may not send acknowledgements
+        immediately upon receiving data. As such, relying on `wait_closed`
+        to know when the peer has read a stream to completion may introduce
+        more latency than using an application-level response of some sort.
+
         Can be interrupted by :meth:`reset`, which causes both the pending
         write and this finish to raise :class:`StreamClosedLocally`.
 
@@ -789,6 +799,43 @@ class SendStream:
 
         Raises:
             StreamClosedLocally: If the stream was already finished or reset.
+        """
+        ...
+
+    async def wait_closed(self) -> int | None:
+        """Wait until the peer stops the stream or reads it to completion.
+
+        Completes when the peer sends ``STOP_SENDING`` (via
+        :meth:`RecvStream.stop`) **or** when the peer acknowledges receipt
+        of all stream data after :meth:`finish`.
+
+        A common pattern is to call this after :meth:`finish` to confirm
+        the peer has received all data::
+
+            await send.finish()
+            await send.wait_closed()  # peer acknowledged receipt
+
+        For a variety of reasons, the peer may not send acknowledgements
+        immediately upon receiving data. As such, relying on `wait_closed`
+        to know when the peer has read a stream to completion may introduce
+        more latency than using an application-level response of some sort.
+
+        Can be interrupted by :meth:`reset`, which causes
+        ``wait_closed()`` to raise :class:`StreamClosedLocally`.
+
+        Returns:
+            The peer's error code if the peer sent ``STOP_SENDING``, or
+            ``None`` if the stream was finished and the peer acknowledged
+            receipt.  Also returns ``None`` if the ``STOP_SENDING`` error
+            code is not a valid WebTransport error code.
+
+        Raises:
+            StreamClosedLocally: If the stream was already reset locally,
+                or :meth:`reset` was called while waiting.
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If a QUIC or HTTP/3 protocol violation occurred.
         """
         ...
 
@@ -905,5 +952,37 @@ class RecvStream:
 
         Raises:
             StreamClosedLocally: If the stream was already stopped.
+        """
+        ...
+
+    async def wait_closed(self) -> int | None:
+        """Wait until the peer resets the stream or it is otherwise closed.
+
+        Completes when the peer sends ``RESET_STREAM`` **or** when the
+        stream was previously :meth:`stop`\\ ped locally, **or** when the
+        peer calls :meth:`~SendStream.finish` and all data has been
+        received, after which it is no longer meaningful for the stream
+        to be reset.
+
+        For a variety of reasons, the peer may not send acknowledgements
+        immediately upon receiving data. As such, relying on ``wait_closed``
+        to know when the peer has finished a stream may introduce more
+        latency than using an application-level response of some sort.
+
+        Can be interrupted by :meth:`stop`, which causes
+        ``wait_closed()`` to raise :class:`StreamClosedLocally`.
+
+        Returns:
+            The peer's error code if the peer sent ``RESET_STREAM``, or
+            ``None`` if the stream was stopped locally or the peer
+            finished the stream and all data was received.
+
+        Raises:
+            StreamClosedLocally: If the stream was already stopped locally,
+                or :meth:`stop` was called while waiting.
+            SessionClosedByPeer: If the peer closed the session.
+            SessionClosedLocally: If the session was already closed locally.
+            SessionTimeout: If the session timed out.
+            ProtocolError: If a QUIC or HTTP/3 protocol violation occurred.
         """
         ...

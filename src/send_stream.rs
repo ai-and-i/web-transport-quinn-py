@@ -161,6 +161,13 @@ impl SendStream {
         Ok(())
     }
 
+    /// Wait until the peer stops the stream or reads it to completion.
+    fn wait_closed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.cancellable_write(py, |guard| async move {
+            guard.stopped().await.map_err(errors::map_session_error)
+        })
+    }
+
     /// Stream scheduling priority (higher = higher priority).
     #[getter]
     fn priority(&self) -> i32 {

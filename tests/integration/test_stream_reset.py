@@ -612,3 +612,210 @@ async def test_write_some_after_reset_raises(session_pair):
     send.reset()
     with pytest.raises(web_transport.StreamClosedLocally):
         await send.write_some(b"x")
+
+
+# ---------------------------------------------------------------------------
+# SendStream.wait_closed tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_wait_closed_returns_stop_code(session_pair):
+    """wait_closed() returns peer's error code from STOP_SENDING."""
+    server_session, client_session = session_pair
+
+    send, _recv = await client_session.open_bi()
+
+    async def server_side():
+        _send_s, recv_s = await server_session.accept_bi()
+        recv_s.stop(42)
+
+    task = asyncio.create_task(server_side())
+    code = await asyncio.wait_for(send.wait_closed(), timeout=5.0)
+    assert code == 42
+    await task
+
+
+@pytest.mark.asyncio
+async def test_send_wait_closed_after_reset_raises(session_pair):
+    """reset() then wait_closed() -> StreamClosedLocally."""
+    _server_session, client_session = session_pair
+
+    send, _recv = await client_session.open_bi()
+    send.reset()
+    with pytest.raises(web_transport.StreamClosedLocally):
+        await send.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_reset_cancels_pending_send_wait_closed(session_pair):
+    """reset() while wait_closed() is pending -> StreamClosedLocally."""
+    server_session, client_session = session_pair
+
+    send, _recv = await client_session.open_bi()
+
+    # Accept stream but don't send STOP_SENDING — wait_closed will block
+    async def server_side():
+        _send_s, _recv_s = await server_session.accept_bi()
+        await asyncio.sleep(2.0)
+
+    server_task = asyncio.create_task(server_side())
+
+    async def wait():
+        with pytest.raises(web_transport.StreamClosedLocally):
+            await send.wait_closed()
+
+    wait_task = asyncio.create_task(wait())
+    await asyncio.sleep(0.1)
+    send.reset()
+    await asyncio.wait_for(wait_task, timeout=5.0)
+    server_task.cancel()
+    try:
+        await server_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_send_finish_then_wait_closed_peer_acknowledges(session_pair):
+    """finish() -> peer reads to completion -> wait_closed() returns None."""
+    server_session, client_session = session_pair
+
+    send, _recv = await client_session.open_bi()
+
+    async def server_side():
+        _send_s, recv_s = await server_session.accept_bi()
+        data = await recv_s.read()
+        assert data == b"hello"
+
+    task = asyncio.create_task(server_side())
+
+    await send.write(b"hello")
+    await send.finish()
+    code = await asyncio.wait_for(send.wait_closed(), timeout=5.0)
+    assert code is None
+    await task
+
+
+@pytest.mark.asyncio
+async def test_send_wait_closed_session_closed_by_peer(session_pair):
+    """Peer closes session while send.wait_closed() pending -> SessionClosedByPeer."""
+    server_session, client_session = session_pair
+
+    send, _recv = await client_session.open_bi()
+
+    async def server_side():
+        _send_s, _recv_s = await server_session.accept_bi()
+        await asyncio.sleep(0.1)
+        server_session.close(0, "done")
+        await server_session.wait_closed()
+
+    task = asyncio.create_task(server_side())
+
+    with pytest.raises(web_transport.SessionClosedByPeer):
+        await asyncio.wait_for(send.wait_closed(), timeout=5.0)
+    await task
+
+
+# ---------------------------------------------------------------------------
+# RecvStream.wait_closed tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recv_wait_closed_returns_reset_code(session_pair):
+    """Peer resets stream -> recv.wait_closed() returns error code."""
+    server_session, client_session = session_pair
+
+    _send, recv = await client_session.open_bi()
+
+    async def server_side():
+        send_s, _recv_s = await server_session.accept_bi()
+        send_s.reset(42)
+
+    task = asyncio.create_task(server_side())
+    code = await asyncio.wait_for(recv.wait_closed(), timeout=5.0)
+    assert code == 42
+    await task
+
+
+@pytest.mark.asyncio
+async def test_recv_wait_closed_after_stop_raises(session_pair):
+    """stop() then recv.wait_closed() -> StreamClosedLocally."""
+    _server_session, client_session = session_pair
+
+    _send, recv = await client_session.open_bi()
+    recv.stop()
+    with pytest.raises(web_transport.StreamClosedLocally):
+        await recv.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_recv_wait_closed(session_pair):
+    """stop() while recv.wait_closed() is pending -> StreamClosedLocally."""
+    server_session, client_session = session_pair
+
+    _send, recv = await client_session.open_bi()
+
+    async def server_side():
+        _send_s, _recv_s = await server_session.accept_bi()
+        await asyncio.sleep(2.0)
+
+    server_task = asyncio.create_task(server_side())
+
+    async def wait():
+        with pytest.raises(web_transport.StreamClosedLocally):
+            await recv.wait_closed()
+
+    wait_task = asyncio.create_task(wait())
+    await asyncio.sleep(0.1)
+    recv.stop()
+    await asyncio.wait_for(wait_task, timeout=5.0)
+    server_task.cancel()
+    try:
+        await server_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_recv_wait_closed_peer_finishes(session_pair):
+    """Peer finishes stream -> recv.wait_closed() returns None."""
+    server_session, client_session = session_pair
+
+    _send, recv = await client_session.open_bi()
+
+    async def server_side():
+        send_s, _recv_s = await server_session.accept_bi()
+        await send_s.write(b"hello")
+        await send_s.finish()
+
+    task = asyncio.create_task(server_side())
+
+    # Read the data so the stream can complete
+    data = await recv.read()
+    assert data == b"hello"
+
+    code = await asyncio.wait_for(recv.wait_closed(), timeout=5.0)
+    assert code is None
+    await task
+
+
+@pytest.mark.asyncio
+async def test_recv_wait_closed_session_closed_by_peer(session_pair):
+    """Peer closes session while recv.wait_closed() pending -> SessionClosedByPeer."""
+    server_session, client_session = session_pair
+
+    _send, recv = await client_session.open_bi()
+
+    async def server_side():
+        _send_s, _recv_s = await server_session.accept_bi()
+        await asyncio.sleep(0.1)
+        server_session.close(0, "done")
+        await server_session.wait_closed()
+
+    task = asyncio.create_task(server_side())
+
+    with pytest.raises(web_transport.SessionClosedByPeer):
+        await asyncio.wait_for(recv.wait_closed(), timeout=5.0)
+    await task
