@@ -577,7 +577,7 @@ async def test_browser_close_during_server_pending_read(
                 const reader = stream.readable.getReader();
                 await reader.read();
                 // Don't write — just close the transport abruptly
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 50));
                 transport.close({{closeCode: 1, reason: "abort"}});
                 await transport.closed;
                 return true;
@@ -807,6 +807,7 @@ async def test_recv_wait_closed_returns_reset_code(
             session = await request.accept()
             async with session:
                 send, recv = await session.accept_bi()
+                await send.write(b"data")
                 async with send:
                     reset_code = await asyncio.wait_for(recv.wait_closed(), timeout=5.0)
                 await session.wait_closed()
@@ -819,7 +820,9 @@ async def test_recv_wait_closed_returns_reset_code(
                 """
                 const stream = await transport.createBidirectionalStream();
                 const writer = stream.writable.getWriter();
-                await new Promise(r => setTimeout(r, 200));
+                const reader = stream.readable.getReader();
+                await reader.read();
+                await new Promise(r => setTimeout(r, 10));
                 let err = new WebTransportError({ message: "abort", streamErrorCode: 99 });
                 await writer.abort(err);
                 return true;
@@ -999,10 +1002,11 @@ async def test_server_read_on_stream_after_session_close(
             assert request is not None
             session = await request.accept()
             send, recv = await session.accept_bi()
+            await recv.read(1)
             session.close(7, "done")
             await session.wait_closed()
             try:
-                await recv.read(1024)
+                await recv.read(1)
             except (
                 web_transport.SessionClosed,
                 web_transport.StreamClosed,
@@ -1018,8 +1022,12 @@ async def test_server_read_on_stream_after_session_close(
                     """
                     const stream = await transport.createBidirectionalStream();
                     const writer = stream.writable.getWriter();
-                    await writer.write(new Uint8Array([1]));
-                    try { await transport.closed; } catch (e) {}
+                    try {
+                        await writer.write(new Uint8Array([1]));
+                        await writer.write(new Uint8Array([1]));
+                        await writer.write(new Uint8Array([1]));
+                        await transport.closed;
+                    } catch (e) {}
                     return true;
                 """,
                 )

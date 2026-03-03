@@ -117,7 +117,7 @@ async def test_browser_abort_with_code(
                 const writer = stream.writable.getWriter();
                 const reader = stream.readable.getReader();
                 await reader.read(); // wait for server to write
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 50));
                 let err = new WebTransportError({ message: "abort", streamErrorCode: 42 });
                 await writer.abort(err);
                 await transport.closed;

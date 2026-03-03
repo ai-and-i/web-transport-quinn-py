@@ -129,7 +129,8 @@ async def test_uni_multiple_browser_to_server(
                     recv = await session.accept_uni()
                     data = await recv.read()
                     received.append(data)
-                await asyncio.sleep(0.5)  # Let browser finish writes
+                    await recv.wait_closed()
+                await asyncio.sleep(0.1)  # Let browser finish writes
 
         async with asyncio.TaskGroup() as tg:
             tg.create_task(server_side())
