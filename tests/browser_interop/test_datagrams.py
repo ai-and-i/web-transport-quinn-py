@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -240,3 +240,41 @@ async def test_datagram_oversized_raises(
             await run_js(port, hash_b64, "await transport.closed; return true;")
 
     assert error is not None
+
+
+async def test_datagram_at_exact_max_size(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Server sends datagram at exactly max_datagram_size bytes, browser reads it."""
+    async with start_server() as (server, port, hash_b64):
+        sent_size: int = 0
+
+        async def server_side() -> None:
+            nonlocal sent_size
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                max_size = session.max_datagram_size
+                sent_size = max_size
+                # Let browser set up reader
+                await asyncio.sleep(0.1)
+                session.send_datagram(b"\xab" * max_size)
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js(
+                port,
+                hash_b64,
+                """
+                const reader = transport.datagrams.readable.getReader();
+                const { value } = await reader.read();
+                reader.releaseLock();
+                return { length: value.length };
+            """,
+            )
+
+    assert isinstance(result, dict)
+    assert result["length"] == sent_size
+    assert sent_size > 0

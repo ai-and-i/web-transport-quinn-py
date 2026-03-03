@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -253,3 +253,44 @@ async def test_uni_server_to_browser_binary(
             )
 
     assert result == list(range(256))
+
+
+async def test_uni_server_to_browser_large_payload(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Server sends 64KB pattern data via uni stream, browser verifies."""
+    size = 65536
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send = await session.open_uni()
+                async with send:
+                    data = bytes(i % 251 for i in range(size))
+                    await send.write(data)
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js(
+                port,
+                hash_b64,
+                f"""
+                const reader = transport.incomingUnidirectionalStreams.getReader();
+                const {{ value: stream }} = await reader.read();
+                reader.releaseLock();
+                const data = await readAll(stream);
+                let ok = data.length === {size};
+                for (let i = 0; ok && i < data.length; i++) {{
+                    if (data[i] !== (i % 251)) ok = false;
+                }}
+                return {{ length: data.length, ok: ok }};
+            """,
+            )
+
+    assert isinstance(result, dict)
+    assert result["length"] == size
+    assert result["ok"] is True

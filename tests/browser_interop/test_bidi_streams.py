@@ -441,3 +441,83 @@ async def test_bidi_interleaved_request_response(
             )
 
     assert result == ["pong", "pong2"]
+
+
+async def test_bidi_server_opens_multiple_streams(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Server opens 3 bidi streams, sends unique data on each, browser reads all 3."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                for i in range(3):
+                    send, recv = await session.open_bi()
+                    async with send:
+                        await send.write(bytes([i]))
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result = await run_js(
+                port,
+                hash_b64,
+                """
+                const reader = transport.incomingBidirectionalStreams.getReader();
+                const values = [];
+                for (let i = 0; i < 3; i++) {
+                    const { value: stream, done } = await reader.read();
+                    if (done) break;
+                    const data = await readAll(stream.readable);
+                    values.push(data[0]);
+                }
+                reader.releaseLock();
+                values.sort((a, b) => a - b);
+                return Array.from(values);
+            """,
+            )
+
+    assert result == [0, 1, 2]
+
+
+async def test_bidi_server_stream_priority(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Server opens 3 bidi streams with different priorities, sends data on each."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                for i in range(3):
+                    send, recv = await session.open_bi()
+                    send.priority = i
+                    async with send:
+                        await send.write(f"prio{i}".encode())
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result = await run_js(
+                port,
+                hash_b64,
+                """
+                const reader = transport.incomingBidirectionalStreams.getReader();
+                const messages = [];
+                for (let i = 0; i < 3; i++) {
+                    const { value: stream, done } = await reader.read();
+                    if (done) break;
+                    const text = await readAllString(stream.readable);
+                    messages.push(text);
+                }
+                reader.releaseLock();
+                return messages.sort();
+            """,
+            )
+
+    assert result == ["prio0", "prio1", "prio2"]

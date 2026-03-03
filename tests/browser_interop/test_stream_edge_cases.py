@@ -100,6 +100,7 @@ async def test_browser_abort_with_code(
             session = await request.accept()
             async with session:
                 send, recv = await session.accept_bi()
+                await send.write(b"before-abort")
                 async with send:
                     try:
                         await recv.read()
@@ -114,7 +115,9 @@ async def test_browser_abort_with_code(
                 """
                 const stream = await transport.createBidirectionalStream();
                 const writer = stream.writable.getWriter();
-                await new Promise(r => setTimeout(r, 200));
+                const reader = stream.readable.getReader();
+                await reader.read(); // wait for server to write
+                await new Promise(r => setTimeout(r, 100));
                 let err = new WebTransportError({ message: "abort", streamErrorCode: 42 });
                 await writer.abort(err);
                 await transport.closed;
@@ -234,6 +237,7 @@ async def test_server_stop_causes_browser_write_error(
                 send, recv = await session.accept_bi()
                 async with send:
                     recv.stop(7)
+                    await send.write(b"initial")
                 await session.wait_closed()
 
         async with asyncio.TaskGroup() as tg:
@@ -244,10 +248,10 @@ async def test_server_stop_causes_browser_write_error(
                 """
                 const stream = await transport.createBidirectionalStream();
                 const writer = stream.writable.getWriter();
-                // Give server time to send STOP_SENDING
-                await new Promise(r => setTimeout(r, 200));
+                const reader = stream.readable.getReader();
+                await reader.read(); // wait for server to write
                 try {
-                    // Write enough to trigger the error
+                    // Write to trigger the error
                     await writer.write(new Uint8Array(65536));
                     await writer.write(new Uint8Array(65536));
                     return { errored: false };
@@ -575,6 +579,7 @@ async def test_recv_context_manager_stops_if_not_eof(
                     async with recv:
                         # Read one chunk, then exit (stop without reading to EOF)
                         await recv.read(10)
+                    await send.write(b"initial")
                 await session.wait_closed()
 
         async with asyncio.TaskGroup() as tg:
@@ -585,12 +590,12 @@ async def test_recv_context_manager_stops_if_not_eof(
                 """
                 const stream = await transport.createBidirectionalStream();
                 const writer = stream.writable.getWriter();
+                const reader = stream.readable.getReader();
                 // Write initial data
                 await writer.write(new Uint8Array(20));
-                // Give server time to stop
-                await new Promise(r => setTimeout(r, 300));
+                await reader.read(); // wait for server to write
                 try {
-                    // Try writing more — should eventually fail
+                    // Try writing more — should fail
                     for (let i = 0; i < 10; i++) {
                         await writer.write(new Uint8Array(65536));
                     }
@@ -893,6 +898,7 @@ async def test_recv_context_manager_stops_on_exception(
                             raise RuntimeError("intentional")
                     except RuntimeError:
                         pass
+                    await send.write(b"initial")
                 await session.wait_closed()
 
         async with asyncio.TaskGroup() as tg:
@@ -903,12 +909,13 @@ async def test_recv_context_manager_stops_on_exception(
                 """
                 const stream = await transport.createBidirectionalStream();
                 const writer = stream.writable.getWriter();
+                const reader = stream.readable.getReader();
                 // Write initial data
                 await writer.write(new Uint8Array(20));
                 // Give server time to stop
-                await new Promise(r => setTimeout(r, 300));
+                await reader.read(); // wait for server to write
                 try {
-                    // Try writing more — should eventually fail
+                    // Try writing more — should fail
                     for (let i = 0; i < 10; i++) {
                         await writer.write(new Uint8Array(65536));
                     }
@@ -956,3 +963,298 @@ async def test_recv_context_manager_no_stop_at_eof(
             )
 
     assert received == b"complete-data"
+
+
+# ---------------------------------------------------------------------------
+# Stream reset/stop boundary codes
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_reset_code_zero(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Server resets stream with code 0, browser sees streamErrorCode=0."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                await send.write(b"\x01")
+                await asyncio.sleep(0.1)
+                send.reset(0)
+                try:
+                    await recv.read()
+                except web_transport.SessionClosed:
+                    pass
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const reader = stream.readable.getReader();
+                await reader.read();  // read the initial byte
+                try {
+                    await reader.read();
+                    return { errored: false };
+                } catch (e) {
+                    const writer = stream.writable.getWriter();
+                    try { await writer.close(); } catch (_) {}
+                    return {
+                        errored: true,
+                        code: e instanceof WebTransportError ? e.streamErrorCode : null,
+                    };
+                }
+            """,
+            )
+
+    assert isinstance(result, dict)
+    assert result["errored"] is True
+    assert result["code"] == 0
+
+
+async def test_stream_reset_code_255(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Server resets stream with code 255, browser sees streamErrorCode=255."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                await send.write(b"\x01")
+                await asyncio.sleep(0.1)
+                send.reset(255)
+                try:
+                    await recv.read()
+                except web_transport.SessionClosed:
+                    pass
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const reader = stream.readable.getReader();
+                await reader.read();  // read the initial byte
+                try {
+                    await reader.read();
+                    return { errored: false };
+                } catch (e) {
+                    const writer = stream.writable.getWriter();
+                    try { await writer.close(); } catch (_) {}
+                    return {
+                        errored: true,
+                        code: e instanceof WebTransportError ? e.streamErrorCode : null,
+                    };
+                }
+            """,
+            )
+
+    assert isinstance(result, dict)
+    assert result["errored"] is True
+    assert result["code"] == 255
+
+
+async def test_stream_stop_code_zero(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Browser cancels reader with code 0, server sees stop code 0."""
+    async with start_server() as (server, port, hash_b64):
+        stop_code: int | None = -1  # sentinel
+
+        async def server_side() -> None:
+            nonlocal stop_code
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                # Also accept the keepalive stream
+                send2, recv2 = await session.accept_bi()
+                await send.write(b"\x01")
+                stop_code = await asyncio.wait_for(send.wait_closed(), timeout=5.0)
+                await send2.write(b"\x01")
+                await send2.finish()
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const stream2 = await transport.createBidirectionalStream();
+                const reader = stream.readable.getReader();
+                await reader.read();
+                let err = new WebTransportError({ message: "cancel", streamErrorCode: 0 });
+                await reader.cancel(err);
+                // Read from keepalive stream to let server complete
+                const reader2 = stream2.readable.getReader();
+                await reader2.read();
+                reader2.releaseLock();
+                return true;
+            """,
+            )
+
+    assert stop_code == 0
+
+
+async def test_stream_stop_code_255(start_server: ServerFactory, run_js: RunJS) -> None:
+    """Browser cancels reader with code 255, server sees stop code 255."""
+    async with start_server() as (server, port, hash_b64):
+        stop_code: int | None = -1  # sentinel
+
+        async def server_side() -> None:
+            nonlocal stop_code
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                send, recv = await session.accept_bi()
+                # Also accept the keepalive stream
+                send2, recv2 = await session.accept_bi()
+                await send.write(b"\x01")
+                stop_code = await asyncio.wait_for(send.wait_closed(), timeout=5.0)
+                await send2.write(b"\x01")
+                await send2.finish()
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js(
+                port,
+                hash_b64,
+                """
+                const stream = await transport.createBidirectionalStream();
+                const stream2 = await transport.createBidirectionalStream();
+                const reader = stream.readable.getReader();
+                await reader.read();
+                let err = new WebTransportError({ message: "cancel", streamErrorCode: 255 });
+                await reader.cancel(err);
+                // Read from keepalive stream to let server complete
+                const reader2 = stream2.readable.getReader();
+                await reader2.read();
+                reader2.releaseLock();
+                return true;
+            """,
+            )
+
+    assert stop_code == 255
+
+
+# ---------------------------------------------------------------------------
+# Stream isolation
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_reset_isolation(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Reset on one stream does not affect other streams on same session."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                tasks: list[asyncio.Task[None]] = []
+
+                async def handle_stream(
+                    send: web_transport.SendStream,
+                    recv: web_transport.RecvStream,
+                ) -> None:
+                    try:
+                        data = await recv.read()
+                        if data == b"reset-this":
+                            send.reset(33)
+                        else:
+                            async with send:
+                                await send.write(data)
+                    except (
+                        web_transport.StreamClosedByPeer,
+                        web_transport.StreamClosed,
+                    ):
+                        pass
+                    except web_transport.SessionClosed:
+                        pass
+
+                try:
+                    while True:
+                        send, recv = await session.accept_bi()
+                        tasks.append(asyncio.create_task(handle_stream(send, recv)))
+                except web_transport.SessionClosed:
+                    pass
+
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js(
+                port,
+                hash_b64,
+                """
+                const [echoResult, clientResetResult, serverResetResult] =
+                    await Promise.allSettled([
+                        (async () => {
+                            const stream = await transport.createBidirectionalStream();
+                            await writeAllString(stream.writable, "stream0");
+                            return await readAllString(stream.readable);
+                        })(),
+                        (async () => {
+                            const stream = await transport.createBidirectionalStream();
+                            const writer = stream.writable.getWriter();
+                            await writer.write(new TextEncoder().encode("data"));
+                            const err = new WebTransportError({
+                                message: "abort", streamErrorCode: 42
+                            });
+                            await writer.abort(err);
+                        })(),
+                        (async () => {
+                            const stream = await transport.createBidirectionalStream();
+                            await writeAllString(stream.writable, "reset-this");
+                            const reader = stream.readable.getReader();
+                            while (true) {
+                                const { done } = await reader.read();
+                                if (done) throw new Error("expected reset");
+                            }
+                        })()
+                    ]);
+
+                const echoOk = echoResult.status === "fulfilled"
+                    && echoResult.value === "stream0";
+                const clientResetOk = clientResetResult.status === "fulfilled";
+                const srErr = serverResetResult.reason;
+                const serverResetOk = serverResetResult.status === "rejected"
+                    && srErr instanceof WebTransportError
+                    && srErr.streamErrorCode === 33;
+
+                return {
+                    echoOk,
+                    clientResetOk,
+                    serverResetOk,
+                    echoValue: echoResult.value,
+                    srCode: srErr instanceof WebTransportError
+                        ? srErr.streamErrorCode : null,
+                };
+            """,
+            )
+
+    assert isinstance(result, dict)
+    assert result["echoOk"] is True, f"Echo failed: {result.get('echoValue')}"
+    assert result["clientResetOk"] is True
+    assert result["serverResetOk"] is True, f"Server reset code: {result.get('srCode')}"

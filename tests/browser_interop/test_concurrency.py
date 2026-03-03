@@ -9,8 +9,10 @@ import pytest
 
 import web_transport
 
+from .conftest import _webtransport_connect_js
+
 if TYPE_CHECKING:
-    from .conftest import RunJS, ServerFactory
+    from .conftest import RunJS, RunJSRaw, ServerFactory
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -368,3 +370,225 @@ async def test_interleaved_stream_and_datagram(
             )
 
     assert result == ["dg:dg1", "bi:bi1", "dg:dg2", "bi:bi2"]
+
+
+async def test_rapid_stream_creation(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """50 bidi streams opened rapidly, each with unique payload, all echo correctly."""
+    n = 50
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                for _ in range(n):
+                    send, recv = await session.accept_bi()
+                    async with send:
+                        data = await recv.read()
+                        await send.write(data)
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result = await run_js(
+                port,
+                hash_b64,
+                f"""
+                const N = {n};
+                const promises = [];
+                for (let i = 0; i < N; i++) {{
+                    promises.push((async () => {{
+                        const stream = await transport.createBidirectionalStream();
+                        await writeAll(stream.writable, new Uint8Array([i % 256]));
+                        const echoed = await readAll(stream.readable);
+                        return echoed.length === 1 && echoed[0] === (i % 256);
+                    }})());
+                }}
+                const results = await Promise.all(promises);
+                return results.every(r => r === true);
+            """,
+            )
+
+    assert result is True
+
+
+async def test_server_close_while_client_creating_streams(
+    start_server: ServerFactory, run_js: RunJS
+) -> None:
+    """Server closes session after brief delay while browser tries to open 20 streams."""
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+                try:
+                    send, recv = await session.accept_bi()
+                    async with send:
+                        await recv.read()
+                except web_transport.SessionClosed:
+                    return
+                await asyncio.sleep(0.1)
+                session.close(99, "closing")
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js(
+                port,
+                hash_b64,
+                """
+                const N = 20;
+                const promises = [];
+                for (let i = 0; i < N; i++) {
+                    promises.push((async () => {
+                        try {
+                            const stream = await transport.createBidirectionalStream();
+                            const writer = stream.writable.getWriter();
+                            await writer.write(new Uint8Array([i]));
+                            await writer.close();
+                            return true;
+                        } catch (e) {
+                            return false;
+                        }
+                    })());
+                }
+                const results = await Promise.all(promises);
+                const succeeded = results.filter(r => r).length;
+                const failed = results.filter(r => !r).length;
+                try { await transport.closed; } catch (e) {}
+                return { succeeded: succeeded, failed: failed };
+            """,
+            )
+
+    assert isinstance(result, dict)
+    assert result["succeeded"] >= 1
+
+
+async def test_bidirectional_open(start_server: ServerFactory, run_js: RunJS) -> None:
+    """Both browser and server open 5 bidi streams concurrently."""
+    n = 5
+    async with start_server() as (server, port, hash_b64):
+        server_errors: list[str] = []
+
+        async def server_side() -> None:
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            async with session:
+
+                async def server_open(i: int) -> None:
+                    send, recv = await session.open_bi()
+                    async with send:
+                        await send.write(f"s{i}".encode())
+                        await send.finish()
+                        data = await recv.read()
+                        if data != f"s{i}".encode():
+                            server_errors.append(
+                                f"stream {i}: expected s{i}, got {data!r}"
+                            )
+
+                async def server_accept() -> None:
+                    for _ in range(n):
+                        send, recv = await session.accept_bi()
+                        async with send:
+                            data = await recv.read()
+                            await send.write(data)
+
+                async with asyncio.TaskGroup() as inner_tg:
+                    for i in range(n):
+                        inner_tg.create_task(server_open(i))
+                    inner_tg.create_task(server_accept())
+
+                await session.wait_closed()
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js(
+                port,
+                hash_b64,
+                f"""
+                const N = {n};
+                const errors = [];
+
+                const clientOpenPromises = [];
+                for (let i = 0; i < N; i++) {{
+                    clientOpenPromises.push((async () => {{
+                        const stream = await transport.createBidirectionalStream();
+                        const msg = "c" + i;
+                        await writeAllString(stream.writable, msg);
+                        const echo = await readAllString(stream.readable);
+                        if (echo !== msg) errors.push("client " + i + ": got " + echo);
+                    }})());
+                }}
+
+                const serverStreamReader = transport.incomingBidirectionalStreams.getReader();
+                const clientAcceptPromises = [];
+                for (let i = 0; i < N; i++) {{
+                    clientAcceptPromises.push((async () => {{
+                        const {{ value: stream, done }} = await serverStreamReader.read();
+                        if (done) {{ errors.push("incoming ended early"); return; }}
+                        const data = await readAllString(stream.readable);
+                        await writeAllString(stream.writable, data);
+                    }})());
+                }}
+
+                await Promise.all([...clientOpenPromises, ...clientAcceptPromises]);
+                serverStreamReader.releaseLock();
+                return {{ success: errors.length === 0, errors: errors }};
+            """,
+            )
+
+    assert isinstance(result, dict)
+    assert result["success"] is True, f"Browser errors: {result.get('errors')}"
+    assert server_errors == [], f"Server errors: {server_errors}"
+
+
+async def test_multiple_concurrent_sessions(
+    start_server: ServerFactory, run_js_raw: RunJSRaw
+) -> None:
+    """Multiple browser sessions concurrently to same server, each echoing unique data."""
+    n = 5
+    async with start_server() as (server, port, hash_b64):
+
+        async def server_side() -> None:
+            for _ in range(n):
+                request = await server.accept()
+                assert request is not None
+                session = await request.accept()
+                async with session:
+                    send, recv = await session.accept_bi()
+                    async with send:
+                        data = await recv.read()
+                        await send.write(data)
+                    await session.wait_closed()
+
+        setup = _webtransport_connect_js(port, hash_b64)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            result: Any = await run_js_raw(f"""
+                {setup}
+                const N = {n};
+                const promises = [];
+                for (let i = 0; i < N; i++) {{
+                    promises.push((async () => {{
+                        const t = new WebTransport(url, transportOptions);
+                        await t.ready;
+                        const stream = await t.createBidirectionalStream();
+                        await writeAllString(stream.writable, "sess-" + i);
+                        const echo = await readAllString(stream.readable);
+                        t.close();
+                        await t.closed;
+                        return {{ i: i, echo: echo }};
+                    }})());
+                }}
+                const results = await Promise.all(promises);
+                const failed = results.filter(r => r.echo !== "sess-" + r.i);
+                return {{ success: failed.length === 0, failed: failed }};
+            """)
+
+    assert isinstance(result, dict)
+    assert result["success"] is True, f"Failed: {result.get('failed')}"

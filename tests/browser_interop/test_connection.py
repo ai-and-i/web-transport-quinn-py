@@ -647,3 +647,68 @@ async def test_accept_uni_after_browser_close_raises(
             )
 
     assert isinstance(error, web_transport.SessionClosed)
+
+
+async def test_close_unicode_reason(
+    start_server: ServerFactory, run_js_raw: RunJSRaw
+) -> None:
+    """Browser closes with Unicode reason containing emoji, server reads it correctly."""
+    async with start_server() as (server, port, hash_b64):
+        close_reason: web_transport.SessionError | None = None
+
+        async def server_side() -> None:
+            nonlocal close_reason
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            await session.wait_closed()
+            close_reason = session.close_reason
+
+        setup = _webtransport_connect_js(port, hash_b64)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js_raw(f"""
+                {setup}
+                const transport = new WebTransport(url, transportOptions);
+                await transport.ready;
+                transport.close({{closeCode: 1, reason: "goodbye \ud83d\udc4b\ud83c\udf0d"}});
+                await transport.closed;
+                return true;
+            """)
+
+    assert isinstance(close_reason, web_transport.SessionClosedByPeer)
+    assert close_reason.code == 1
+    assert close_reason.reason == "goodbye \U0001f44b\U0001f30d"
+
+
+async def test_close_long_reason(
+    start_server: ServerFactory, run_js_raw: RunJSRaw
+) -> None:
+    """Browser closes with 1KB reason string, server reads it without truncation."""
+    long_reason = "x" * 1024
+    async with start_server() as (server, port, hash_b64):
+        close_reason: web_transport.SessionError | None = None
+
+        async def server_side() -> None:
+            nonlocal close_reason
+            request = await server.accept()
+            assert request is not None
+            session = await request.accept()
+            await session.wait_closed()
+            close_reason = session.close_reason
+
+        setup = _webtransport_connect_js(port, hash_b64)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(server_side())
+            await run_js_raw(f"""
+                {setup}
+                const transport = new WebTransport(url, transportOptions);
+                await transport.ready;
+                transport.close({{closeCode: 1, reason: "x".repeat(1024)}});
+                await transport.closed;
+                return true;
+            """)
+
+    assert isinstance(close_reason, web_transport.SessionClosedByPeer)
+    assert close_reason.code == 1
+    assert close_reason.reason == long_reason
